@@ -1,124 +1,123 @@
 import streamlit as st
 from langchain_openai import ChatOpenAI
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain.agents import initialize_agent, AgentType
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
 from langchain.callbacks import StreamlitCallbackHandler
 
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="360° Sales Analyst",
-    page_icon="🕵️‍♂️",
-    layout="wide"
-)
+# --- 1. Page Config ---
+st.set_page_config(page_title="360° Sales Analyst", page_icon="🕵️‍♂️", layout="wide")
 
-# --- Sidebar: Configuration ---
+# --- 2. Sidebar for API Key ---
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    api_key = st.text_input("OpenAI API Key (Optional)", type="password", help="Required only if you want to run the analysis directly here.")
-    st.info("💡 **No Key?** No problem. Fill out the form, generate the prompt, and copy-paste it into Gemini or ChatGPT.")
+    st.header("⚙️ Settings")
+    api_key = st.text_input("OpenAI API Key", type="password")
     st.markdown("---")
-    st.markdown("**About**\n\nThis tool generates a 'Zero-Fluff' competitive intelligence briefing based on the **Mega-Prompt V3** framework.")
+    st.markdown("**How it works:**\n\nThis app uses an AI Agent to browse the web (10-K, News, Earnings) and build a competitive briefing based on your Mega-Prompt framework.")
 
-# --- Main Interface ---
-st.title("🕵️‍♂️ 360° Sales Intelligence Analyst")
-st.markdown("Generate deep-dive competitive briefings for your prospects in seconds.")
+# --- 3. Main Interface ---
+st.title("🕵️‍♂️ 360° Competitive Intelligence Analyst")
+st.markdown("Enter a target, and the AI will research specific initiatives, risks, and health signals.")
 
 col1, col2 = st.columns(2)
-
 with col1:
     target_company = st.text_input("Target Company", placeholder="e.g. Agilent Technologies")
-    business_unit = st.text_input("Business Unit / Focus Area", placeholder="e.g. Life Sciences Group")
-
+    business_unit = st.text_input("Business Unit / Focus", placeholder="e.g. Life Sciences Group")
 with col2:
-    competitors = st.text_input("Known Competitors (Optional)", placeholder="e.g. Thermo Fisher, Waters")
-    user_context = st.text_area("Additional Context (Optional)", placeholder="Paste LinkedIn snippets, job posts, or specific questions here...", height=100)
+    competitors = st.text_input("Direct Competitors", placeholder="e.g. Thermo Fisher, Waters")
+    user_context = st.text_area("Additional Context (Optional)", placeholder="Paste LinkedIn notes or specific questions here...", height=100)
 
-# --- The Mega-Prompt Template ---
-def build_prompt(company, unit, comps, context):
-    competitor_text = f"specifically against {comps}" if comps else "against their direct unit-level competitors"
+# --- 4. The Logic ---
+if st.button("🚀 Run Analysis"):
+    if not api_key:
+        st.warning("⚠️ Please enter your OpenAI API Key in the sidebar to proceed.")
+        st.stop()
     
-    prompt_text = f"""
-    **Role:** You are a Senior Market Intelligence Analyst. Your goal is to produce a "Zero-Fluff" competitive briefing for **{company}**, focusing specifically on the **{unit}** business unit.
+    if not target_company or not business_unit:
+        st.warning("⚠️ Please enter both a Company and a Business Unit.")
+        st.stop()
 
-    **Constraint:** Do NOT provide generic sales advice. Do NOT guess. If a data point is unavailable, mark it as "N/A".
+    # Define the "Mega-Prompt" Template
+    # We inject the user's inputs directly into the system instructions
+    prompt_template = PromptTemplate.from_template(
+        """
+        You are a Senior Market Intelligence Analyst. Your goal is to produce a "Zero-Fluff" competitive briefing.
+        
+        TARGET: {company}
+        UNIT: {unit}
+        COMPETITORS: {competitors}
+        CONTEXT: {context}
 
-    **Context Provided:**
-    {context}
+        TOOLS:
+        You have access to the following tools:
+        {tools}
 
-    **Instructions:**
-    Using the latest 10-K, Investor Presentations, and Quarterly Earnings:
+        INSTRUCTIONS:
+        Use the tools to find the latest 10-K, Quarterly Earnings, and Press Releases.
+        Then, answer the following request with strict adherence to the format below.
+        
+        OUTPUT FORMAT (Use Markdown Tables):
+        
+        **Section A: Business Unit Health**
+        - Compare {unit} growth/margins vs {competitors}.
+        - Rate the health (Positive/Neutral/Negative).
+        
+        **Section B: Strategic Initiatives**
+        - Identify 2-3 funded projects (M&A, New Factories, R&D).
+        - Cite the source (e.g., "Q3 Earnings Call").
+        
+        **Section C: Risk Radar**
+        - Cash Flow position.
+        - Layoff/Restructuring news in last 6 months.
+        - Top 3 Risk Factors from the 10-K specific to this unit.
+        
+        **Section D: Soft Signals**
+        - Leadership changes (C-Suite).
+        - Hiring hotspots (Locations/Roles).
 
-    **Section A: Business Unit Health & Competitor Mapping**
-    *Create a table with these columns:*
-    * **Selected Unit:** {unit}
-    * **Performance:** Organic Growth % (YoY) and Margin Trend for this unit.
-    * **Direct Competitors:** Compare {competitor_text}.
-    * **Market Share Signal:** Are they growing faster or slower than these rivals?
+        ----------------
+        To use a tool, use this format:
+        
+        Question: the input question you must answer
+        Thought: you should always think about what to do
+        Action: the action to take, should be one of [{tool_names}]
+        Action Input: the input to the action
+        Observation: the result of the action
+        ... (this Thought/Action/Action Input/Observation can repeat N times)
+        Thought: I now know the final answer
+        Final Answer: the final answer to the original input question
 
-    **Section B: Main Customers & Markets**
-    *Identify the primary buyer types for {unit}.*
-    * **Key Segments:** Who are they selling to?
-    * **Reference Customers:** List specific company names if public.
-    * **Buying Behavior:** Why do customers choose {company} over competitors? (e.g., Speed vs. Price vs. Regulatory Safety).
+        Begin!
 
-    **Section C: Strategic Initiatives (Follow the Money)**
-    *Identify 2-3 "Funded" Priorities for {unit}.*
-    * **Initiative Name:** (e.g., "Project Level Up").
-    * **Evidence:** Must be cited from Investor Decks or Press Releases.
-    * **Operational Goal:** What metric are they trying to change?
+        Question: Research {company} and generate the report.
+        Thought: {agent_scratchpad}
+        """
+    )
 
-    **Section D: Financial & Risk Reality**
-    * **Cash Flow (Company Level):** Operating Cash Flow vs. Capex.
-    * **Layoff Radar:** Any WARN notices or restructuring costs in the last 6 months?
-    * **Risk Factors:** Top 3 risks from the 10-K that directly impact {unit}.
+    # Initialize Tools & Model
+    search = DuckDuckGoSearchRun()
+    tools = [search]
+    llm = ChatOpenAI(temperature=0, openai_api_key=api_key, model_name="gpt-4-turbo-preview")
 
-    **Section E: "Soft Signal" Sentiment**
-    * **Leadership:** Recent changes in Division Heads or C-Suite.
-    * **Hiring Patterns:** Are they opening new hubs or R&D centers?
+    # Create the Agent (The Modern Way)
+    agent = create_react_agent(llm, tools, prompt_template)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
 
-    **Output Format:**
-    Strict Markdown tables. Bullet points must be concise (under 15 words).
-    """
-    return prompt_text
-
-# --- Logic ---
-if target_company and business_unit:
-    final_prompt = build_prompt(target_company, business_unit, competitors, user_context)
+    # Run the Agent with Streamlit Feedback
+    st.info(f"🔍 Analyzing {target_company}... This takes about 45 seconds.")
+    st_callback = StreamlitCallbackHandler(st.container())
     
-    # Tab Structure
-    tab1, tab2 = st.tabs(["📋 Generate Prompt", "🤖 Run AI Agent"])
-
-    # TAB 1: Copy-Paste Mode
-    with tab1:
-        st.subheader("Generated Prompt")
-        st.markdown("Copy this text and paste it into **Gemini Advanced** or **ChatGPT Plus**.")
-        st.code(final_prompt, language="markdown")
-
-    # TAB 2: Agent Mode
-    with tab2:
-        st.subheader("Live Analysis Agent")
-        if not api_key:
-            st.warning("⚠️ Please enter an OpenAI API Key in the sidebar to run the agent.")
-        else:
-            if st.button("Run Analysis Now"):
-                st.info("🔍 Agent is browsing the web... this may take 1-2 minutes.")
-                
-                # Initialize Tools & Agent
-                search = DuckDuckGoSearchRun()
-                llm = ChatOpenAI(temperature=0, openai_api_key=api_key, model_name="gpt-4-turbo")
-                
-                # We use a Zero-Shot React Agent to allow the LLM to search multiple times
-                tools = [search]
-                agent = initialize_agent(
-                    tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True, handle_parsing_errors=True
-                )
-                
-                st_callback = StreamlitCallbackHandler(st.container())
-                
-                # Execute
-                response = agent.run(final_prompt, callbacks=[st_callback])
-                st.markdown("### 📊 Analyst Report")
-                st.markdown(response)
-
-else:
-    st.info("👈 Enter a Company and Business Unit to begin.")
+    # Execute
+    input_data = {
+        "company": target_company,
+        "unit": business_unit,
+        "competitors": competitors if competitors else "Direct Competitors",
+        "context": user_context if user_context else "None provided"
+    }
+    
+    response = agent_executor.invoke(input_data, config={"callbacks": [st_callback]})
+    
+    # Display Result
+    st.success("Analysis Complete!")
+    st.markdown("### 📊 Analyst Report")
+    st.markdown(response["output"])
