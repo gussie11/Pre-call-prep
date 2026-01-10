@@ -33,8 +33,8 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
-        # 1.5 Pro is best for "Reasoning" and detail. Flash is faster but thinner.
-        models = ["models/gemini-1.5-pro-latest", "models/gemini-1.5-pro", "models/gemini-1.5-flash"]
+        # 1.5 Pro is best for complex JSON parsing
+        models = ["models/gemini-1.5-pro", "models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
         for m in models:
             try:
                 model = genai.GenerativeModel(m)
@@ -48,20 +48,18 @@ def extract_json(text):
     try:
         if "```" in text:
             text = text.split("```json")[-1].split("```")[0]
+        # Robust regex to find the largest list structure
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match: return json.loads(match.group(0))
         return json.loads(text)
     except: return None
 
 def robust_search(query, max_retries=3):
-    """
-    Fetches MORE results (max_results=10) to ensure high detail.
-    """
     with DDGS() as ddgs:
         for attempt in range(max_retries):
             try:
-                # Increased to 10 to get deep context
-                results = [r for r in ddgs.text(query, max_results=10)]
+                # Get more results to ensure we catch smaller companies
+                results = [r for r in ddgs.text(query, max_results=8)]
                 if results: return results
                 time.sleep(0.5)
             except:
@@ -72,27 +70,41 @@ def robust_search(query, max_retries=3):
 # --- APP FLOW ---
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
-# STEP 1: IDENTIFICATION
+# STEP 1: ADAPTIVE IDENTIFICATION
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
-    company_input = st.text_input("Target Company Name", placeholder="e.g. Merck, Agilent")
+    company_input = st.text_input("Target Company Name", placeholder="e.g. Merck, Solvias, Agilent")
     
     if st.button("Find Account", type="primary"):
         if not api_key: st.error("❌ Need API Key"); st.stop()
             
-        with st.spinner(f"Scanning entities for '{company_input}'..."):
-            # SEARCH: Look for distinct entities
-            q = f"{company_input} distinct legal entities headquarters investor relations"
+        with st.spinner(f"Scanning for '{company_input}'..."):
+            # 1. Broad Search
+            q = f"{company_input} corporate structure headquarters business units investor relations"
             results = robust_search(q)
             search_text = str(results)
             
+            # 2. Adaptive Prompt
             prompt = f"""
-            Task: Identify major corporate entities named '{company_input}'.
-            Context: Distinguish between similar companies (e.g. Merck US vs Merck Germany).
-            Search Data: {search_text}
+            Task: Analyze the search data for '{company_input}'.
             
-            OUTPUT: JSON list ONLY.
-            Format: [{{ "name": "Full Legal Name", "description": "HQ/Type", "units": ["Unit 1", "Unit 2"] }}]
+            SCENARIO A: Ambiguous Name (e.g. "Merck")
+            - Return multiple objects for each distinct legal entity (e.g. Merck & Co US, Merck KGaA Germany).
+            
+            SCENARIO B: Unique Name (e.g. "Solvias")
+            - Return a SINGLE object for that company.
+            
+            Output: JSON list ONLY.
+            Format: 
+            [
+              {{ 
+                "name": "Full Legal Name", 
+                "description": "HQ Location / Core Business", 
+                "units": ["List 3-5 Major Business Units found"] 
+              }}
+            ]
+            
+            Search Data: {search_text}
             """
             
             response = run_gemini(prompt)
@@ -103,7 +115,7 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("No distinct entities found.")
+                st.error(f"Could not structure data for '{company_input}'. Try adding the HQ city (e.g. 'Solvias Basel').")
 
 # STEP 2: DEEP DIVE
 if st.session_state.step == 2:
@@ -115,7 +127,8 @@ if st.session_state.step == 2:
     with col1:
         opts = st.session_state.entity_options
         names = [f"{o['name']} ({o['description']})" for o in opts]
-        idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
+        # If only 1 option, auto-select it
+        idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x], index=0)
         real_company = opts[idx]['name']
     with col2:
         raw_units = opts[idx].get('units', [])
@@ -126,25 +139,27 @@ if st.session_state.step == 2:
     with st.expander("Add Deal Context", expanded=True):
         c1, c2 = st.columns(2)
         competitors = c1.text_input("Competitors", placeholder="e.g. Thermo Fisher")
-        context = c2.text_input("Your Goal", placeholder="e.g. Selling CRM software")
+        context = c2.text_input("Your Goal", placeholder="e.g. Selling Lab Automation...")
 
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
-        with st.spinner(f"Generating Deep-Dive for {real_company}..."):
+        with st.spinner(f"Analyzing {real_company}..."):
             
-            # 1. DEEP SEARCH STRATEGY
+            # 1. INTELLIGENT SEARCH
             search_dump = ""
+            
+            # Detect if it's a private company (like Solvias) or public
             if "All" in real_unit:
                 queries = [
-                    f"{real_company} annual report 2024 CEO letter strategy outlook",
-                    f"{real_company} investor presentation 2025 strategic priorities",
-                    f"{real_company} Q3 2024 financial results transcript revenue growth",
-                    f"{real_company} operational challenges restructuring risks 2025"
+                    f"{real_company} investor relations annual report 2024 2025",
+                    f"{real_company} press releases new facility investment 2025",
+                    f"{real_company} strategic partnership announcements 2024",
+                    f"{real_company} leadership changes CEO 2024 2025"
                 ]
             else:
                 queries = [
-                    f"{real_company} {real_unit} revenue growth market share 2024",
-                    f"{real_company} {real_unit} strategic focus innovation 2025",
-                    f"{real_company} {real_unit} competitors comparison analysis"
+                    f"{real_company} {real_unit} revenue growth market share",
+                    f"{real_company} {real_unit} new service launch 2025",
+                    f"{real_company} {real_unit} competitor analysis {competitors}"
                 ]
             
             for q in queries:
@@ -152,9 +167,9 @@ if st.session_state.step == 2:
                 if res:
                     search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
 
-            # 2. THE "HIGH FIDELITY" PROMPT
+            # 2. "HIGH FIDELITY" PROMPT
             final_prompt = f"""
-            Role: Expert Enterprise Strategist.
+            Role: Expert Senior Sales Analyst.
             Target: **{real_company}** (Scope: **{real_unit}**).
             Competitors: {competitors}
             User Context: {context}
@@ -162,39 +177,39 @@ if st.session_state.step == 2:
             RAW WEB DATA:
             {search_dump}
             
-            INSTRUCTIONS FOR RICHNESS:
-            1. **Expand & Connect:** Do not just list facts. Explain *why* they matter. Connect the web data to your internal knowledge of the company's long-term history and culture.
-            2. **Fill the Gaps:** If the web data is thin on a specific number, use your internal training to describe the *strategic reality* of that unit (e.g., "While 2025 specific targets aren't public, this unit historically drives 40% of revenue through X strategy...").
-            3. **Be Specific:** Name specific drugs, products, regions, or technologies whenever possible.
+            INSTRUCTIONS:
+            1. **Synthesis:** Combine the web data with your internal knowledge. 
+               - If the company is Private (like Solvias), you won't find a 10-K. Instead, look for "Proxies" of growth: New factory openings, acquisitions, or hiring sprees.
+            2. **Be Specific:** Do not just say "They are growing." Say "They expanded the North Carolina facility" (if true).
+            3. **Fill Gaps:** If numbers are missing, explain the *Strategic Logic* of the unit based on industry standards.
             
-            PRODUCE THIS REPORT:
+            REPORT SECTIONS:
             
-            ### 1. Business Health & Trajectory
-            * **Growth Reality:** Go beyond "Stable." Are they in a super-cycle? A restructuring phase? A post-COVID slump? Cite revenue trends if available, or infer from industry context.
-            * **Competitive Dynamics:** How do they actually stack up against {competitors}? Who is winning the innovation war?
+            ### 1. Business Health & Signals
+            * **Growth Reality:** (e.g. "Aggressive Expansion" vs "Cost Cutting"). Cite evidence (e.g. New sites, M&A).
+            * **Market Position:** Where do they fit vs {competitors}? (e.g. "Premium Niche Player" vs "Volume Leader").
             
             ### 2. Strategic Initiatives (Follow the Money)
-            * Identify 3 concrete areas where they are spending money (e.g. New Factories, R&D in AI, M&A).
-            * **The "Why":** For each initiative, explain the operational goal. (e.g., "Building a factory in Cork to bypass US tariffs").
+            * List 3 concrete investments (Buildings, Tech, People).
+            * **The Goal:** Why are they spending this money?
             
-            ### 3. The Risk Landscape
-            * **Financial Pressure:** Are they cash-rich and buying? Or debt-heavy and cutting?
-            * **Operational Friction:** Layoffs, supply chain issues, or leadership exits?
+            ### 3. Risk & Friction
+            * **Operational:** Integration pains? Regulatory hurdles?
+            * **Financial:** Private Equity ownership pressure? (If PE owned).
             
-            ### 4. "Soft Signals" & Culture
-            * What is the leadership vibe? (e.g., "New CEO focused on efficiency" vs "Founder-led innovation").
-            * Hiring/Firing trends.
+            ### 4. "Soft Signals"
+            * Culture vibe, Leadership focus, Hiring hot-spots.
             
-            Format: Comprehensive paragraphs and detailed bullet points. Avoid brevity.
+            Format: Rich Markdown with clear headings.
             """
             
             report = run_gemini(final_prompt)
             
             if report:
-                st.markdown(f"### 📊 Deep-Dive Analysis: {real_company}")
+                st.markdown(f"### 📊 Analyst Briefing: {real_company}")
                 st.markdown(report)
                 
-                with st.expander("🔎 Source Data Used"):
+                with st.expander("🔎 View Source Data"):
                     st.text(search_dump if search_dump else "Relied on Internal Knowledge.")
             else:
                 st.error("AI generation failed.")
