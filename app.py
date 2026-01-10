@@ -25,22 +25,18 @@ if api_key:
 
 # --- HELPER: Find a working model ---
 def get_working_model():
-    # List of models to try in order of preference
+    # UPDATED LIST based on your specific access rights
     candidates = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-pro",
-        "models/gemini-1.5-flash",
-        "models/gemini-pro"
+        "models/gemini-2.5-flash",       # Your best available model
+        "models/gemini-2.5-pro",         # Your premium model
+        "models/gemini-2.0-flash",       # Fallback
+        "models/gemini-flash-latest",    # Generic fallback
+        "models/gemini-pro-latest"
     ]
-    
-    # Simple check to return the string (we'll catch errors during generation)
-    # Ideally, we would list_models() but that requires an extra API call.
-    # We will let the generation loop handle the fallback.
     return candidates
 
 # 4. Main Interface
-st.title("🚀 360° Sales Analyst (Auto-Fix)")
+st.title("🚀 360° Sales Analyst (Gemini 2.5)")
 st.markdown("Generate a pre-call briefing using live web data.")
 
 col1, col2 = st.columns(2)
@@ -87,7 +83,7 @@ if st.button("Run Analysis", type="primary"):
     Data:
     {search_results}
     
-    Output:
+    Output Format (Markdown Tables):
     1. Business Health (Growth/Margins)
     2. Strategic Initiatives (Funded Projects)
     3. Risks (Cash/Layoffs)
@@ -100,7 +96,8 @@ if st.button("Run Analysis", type="primary"):
     
     for model_name in model_list:
         try:
-            status.text(f"Trying model: {model_name}...")
+            # status.text(f"Trying model: {model_name}...") 
+            # Commented out to reduce UI flicker
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             
@@ -116,12 +113,4 @@ if st.button("Run Analysis", type="primary"):
             continue # Try the next one
 
     if not success:
-        status.error("❌ All models failed. Debug Info Below:")
-        st.error("We could not find a model that accepts your key. Here are the models your key DOES have access to:")
-        try:
-            # List available models to debug
-            available = list(genai.list_models())
-            valid_names = [m.name for m in available if 'generateContent' in m.supported_generation_methods]
-            st.code(valid_names)
-        except Exception as e:
-            st.error(f"Could not list models: {e}")
+        status.error("❌ All models failed. Please check your API Key permissions.")
