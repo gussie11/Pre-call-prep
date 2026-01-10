@@ -1,5 +1,3 @@
-st.write("Debug Mode:")
-st.write(st.secrets)
 import streamlit as st
 import google.generativeai as genai
 from google.api_core import exceptions
@@ -7,7 +5,7 @@ import time
 import io
 import csv
 
-# --- PAGE CONFIGURATION ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="360° Customer Intelligence",
     page_icon="🕵️‍♂️",
@@ -15,16 +13,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- CUSTOM CSS (Your High-Contrast Dark Mode) ---
+# --- 2. CUSTOM CSS (High Contrast Dark Mode) ---
 st.markdown("""
 <style>
-    /* 1. MAIN APP BACKGROUND */
+    /* MAIN BACKGROUND */
     .stApp {
         background-color: #0E1117;
         color: #FAFAFA;
     }
     
-    /* 2. TEXT COLORS */
+    /* TEXT COLORS */
     h1, h2, h3, h4, h5, h6, p, label, span, div {
         color: #FAFAFA;
         font-family: 'Helvetica Neue', sans-serif;
@@ -32,48 +30,24 @@ st.markdown("""
     h1 { font-weight: 700; }
     h3 { font-weight: 600; color: #E0E0E0 !important; }
     
-    /* 3. INPUT BOXES */
+    /* INPUT BOXES */
     .stTextInput > div > div > input, 
     .stSelectbox > div > div > div, 
-    .stMultiSelect > div > div > div {
+    .stTextArea > div > div > textarea {
         background-color: #262730 !important;
         color: white !important;
         border: 1px solid #4A4A4A;
     }
 
-    /* FIX: FORCE DROPDOWNS TO BE WHITE */
-    div[data-baseweb="popover"],
-    div[data-baseweb="menu"],
-    div[role="listbox"] {
+    /* DROPDOWNS (Force White for Readability) */
+    div[data-baseweb="popover"], div[data-baseweb="menu"], div[role="listbox"] {
         background-color: #ffffff !important;
-        border: 1px solid #ccc !important;
     }
-    li[role="option"],
-    div[role="option"] {
-        background-color: #ffffff !important;
-        color: #000000 !important;
-    }
-    div[data-baseweb="menu"] div, 
-    div[data-baseweb="menu"] span,
-    li[role="option"] span, 
-    li[role="option"] div {
-        color: #000000 !important; 
-    }
-    li[role="option"]:hover,
-    div[role="option"]:hover {
-        background-color: #f0f0f0 !important;
+    li[role="option"], div[role="option"] {
         color: #000000 !important;
     }
     
-    .stMultiSelect span[data-baseweb="tag"] {
-        background-color: #FF4B4B !important; 
-        color: white !important;
-    }
-    .stMultiSelect span[data-baseweb="tag"] span {
-        color: white !important;
-    }
-    
-    /* 4. RESULT BOX */
+    /* RESULT BOX STYLING */
     .result-box {
         background-color: #262730;
         padding: 2rem;
@@ -84,7 +58,7 @@ st.markdown("""
         color: #FAFAFA;
     }
     
-    /* 5. BUTTON STYLING */
+    /* BUTTON STYLING */
     div.stButton > button {
         width: 100%;
         border-radius: 8px;
@@ -100,57 +74,53 @@ st.markdown("""
         transform: translateY(-2px);
     }
     
-    .block-container {
-        padding-top: 2rem;
-    }
+    .block-container { padding-top: 2rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE ---
+# --- 3. SESSION STATE ---
 if "generated_result" not in st.session_state:
     st.session_state.generated_result = None
 if "last_company" not in st.session_state:
     st.session_state.last_company = ""
 
-# --- API SETUP ---
+# --- 4. API SETUP (Robust Error Handling) ---
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    api_key = None
-
-if not api_key:
-    st.error("⚠️ API Key missing. Please set GEMINI_API_KEY in .streamlit/secrets.toml")
+    if "GEMINI_API_KEY" in st.secrets:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        MODEL_NAME = 'models/gemini-2.0-flash-exp'
+    else:
+        st.error("⚠️ API Key missing in secrets.toml. Please add GEMINI_API_KEY.")
+        st.stop()
+except FileNotFoundError:
+    st.error("⚠️ No .streamlit/secrets.toml file found. Please create one.")
     st.stop()
 
-genai.configure(api_key=api_key)
-MODEL_NAME = 'models/gemini-2.0-flash-exp'
-
-# --- HELPER FUNCTIONS ---
+# --- 5. HELPER FUNCTIONS ---
 def clean_raw_output(text):
     if not text: return ""
-    # Basic cleanup if needed
     if "||" in text: text = text.replace("||", "|\n|")
     return text
 
 @st.cache_data(show_spinner=False)
 def generate_content_with_retry(model_name, prompt):
     model = genai.GenerativeModel(model_name)
-    delay = 45 
+    delay = 2 
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
             response = model.generate_content(prompt)
             return response.text
         except exceptions.ResourceExhausted:
-            st.warning(f"📉 Quota hit. Cooling down for {delay}s... (Attempt {attempt}/{max_retries})")
+            st.warning(f"📉 Quota hit. Retrying in {delay}s...")
             time.sleep(delay)
-            delay += 10
+            delay *= 2
         except Exception as e:
             return f"Error: {str(e)}"
     return "❌ Failed: Maximum retries exceeded."
 
-# --- PROMPT TEMPLATE ---
-# This is the "Mega-Prompt" logic tailored for the app
+# --- 6. THE INTELLIGENCE PROMPT ---
 MASTER_PROMPT = """
 You are a Senior Market Intelligence Analyst. Your goal is to produce a "Zero-Fluff" competitive briefing.
 
@@ -192,17 +162,17 @@ Generate a response with exactly these Markdown tables:
 - **Hiring Hotspots:** [List roles/locations actively hiring]
 """
 
-# --- UI LAYOUT ---
+# --- 7. UI LAYOUT ---
 col_logo, col_title = st.columns([0.5, 5])
 with col_logo:
     st.markdown("## 🕵️‍♂️")
 with col_title:
     st.title("360° Customer Intelligence")
-    st.caption("Generate deep-dive competitive briefings for call preparation.")
+    st.caption("Generate deep-dive competitive briefings for account planning.")
 
 st.write("") 
 
-# --- MAIN FORM CONTAINER ---
+# --- 8. INPUT FORM ---
 with st.container(border=True):
     col1, col2 = st.columns(2)
     with col1:
@@ -218,10 +188,10 @@ with st.container(border=True):
     st.write("") 
     st.write("---") 
     
-    # --- BUTTON ---
+    # --- EXECUTE BUTTON ---
     submit_btn = st.button("✨ Run Analysis", type="primary", use_container_width=True)
 
-# --- LOGIC EXECUTION ---
+# --- 9. LOGIC EXECUTION ---
 if submit_btn:
     if not company or not unit:
         st.warning("⚠️ Please define at least the Company and Business Unit.")
@@ -242,7 +212,7 @@ if submit_btn:
             st.session_state.generated_result = clean_text
             st.session_state.last_company = company
 
-# --- RESULT DISPLAY ---
+# --- 10. RESULT DISPLAY & CSV EXPORT ---
 if st.session_state.generated_result:
     st.markdown(f"""
     <div class="result-box">
@@ -255,7 +225,7 @@ if st.session_state.generated_result:
     # CSV Logic (Scrapes tables from the Markdown response)
     try:
         lines = st.session_state.generated_result.split('\n')
-        # Simple heuristic: Lines with pipes | are table rows
+        # Filter for table rows (must contain pipe character)
         table_lines = [line for line in lines if "|" in line]
         
         cleaned_rows = []
