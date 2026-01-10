@@ -33,8 +33,8 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
-        # We use 1.5 Pro or Flash as they have good internal knowledge
-        models = ["models/gemini-1.5-pro-latest", "models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
+        # 1.5 Pro is best for "Reasoning" and detail. Flash is faster but thinner.
+        models = ["models/gemini-1.5-pro-latest", "models/gemini-1.5-pro", "models/gemini-1.5-flash"]
         for m in models:
             try:
                 model = genai.GenerativeModel(m)
@@ -54,11 +54,14 @@ def extract_json(text):
     except: return None
 
 def robust_search(query, max_retries=3):
+    """
+    Fetches MORE results (max_results=10) to ensure high detail.
+    """
     with DDGS() as ddgs:
         for attempt in range(max_retries):
             try:
-                # Get results as a list
-                results = [r for r in ddgs.text(query, max_results=4)]
+                # Increased to 10 to get deep context
+                results = [r for r in ddgs.text(query, max_results=10)]
                 if results: return results
                 time.sleep(0.5)
             except:
@@ -78,8 +81,8 @@ if st.session_state.step == 1:
         if not api_key: st.error("❌ Need API Key"); st.stop()
             
         with st.spinner(f"Scanning entities for '{company_input}'..."):
-            # SEARCH TRICK: Look for investor relations pages specifically
-            q = f"{company_input} investor relations distinct legal entities headquarters"
+            # SEARCH: Look for distinct entities
+            q = f"{company_input} distinct legal entities headquarters investor relations"
             results = robust_search(q)
             search_text = str(results)
             
@@ -115,7 +118,6 @@ if st.session_state.step == 2:
         idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
         real_company = opts[idx]['name']
     with col2:
-        # "All" Option + Units
         raw_units = opts[idx].get('units', [])
         combined_units = ["All / Full Company Overview"] + raw_units
         real_unit = st.selectbox("Select Business Unit:", combined_units)
@@ -127,25 +129,22 @@ if st.session_state.step == 2:
         context = c2.text_input("Your Goal", placeholder="e.g. Selling CRM software")
 
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
-        with st.spinner(f"Analyzing {real_company}..."):
+        with st.spinner(f"Generating Deep-Dive for {real_company}..."):
             
-            # 1. TARGETED SEARCH (BETTER QUERIES)
+            # 1. DEEP SEARCH STRATEGY
             search_dump = ""
-            
-            # Use 'site:' operator to force official data sources if possible
-            # We assume company name is unique enough, or we use the specific name found in Step 1
             if "All" in real_unit:
                 queries = [
-                    f"{real_company} investor relations presentation 2024 2025",
-                    f"{real_company} annual report 2024 strategic priorities",
-                    f"{real_company} financial results Q3 2024 revenue growth",
-                    f"{real_company} restructuring layoffs cost savings 2025"
+                    f"{real_company} annual report 2024 CEO letter strategy outlook",
+                    f"{real_company} investor presentation 2025 strategic priorities",
+                    f"{real_company} Q3 2024 financial results transcript revenue growth",
+                    f"{real_company} operational challenges restructuring risks 2025"
                 ]
             else:
                 queries = [
-                    f"{real_company} {real_unit} revenue organic growth 2024",
-                    f"{real_company} {real_unit} strategic focus areas 2025",
-                    f"{real_company} {real_unit} competitor market share analysis"
+                    f"{real_company} {real_unit} revenue growth market share 2024",
+                    f"{real_company} {real_unit} strategic focus innovation 2025",
+                    f"{real_company} {real_unit} competitors comparison analysis"
                 ]
             
             for q in queries:
@@ -153,50 +152,49 @@ if st.session_state.step == 2:
                 if res:
                     search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
 
-            # 2. THE "ANALYST INSTINCT" PROMPT
+            # 2. THE "HIGH FIDELITY" PROMPT
             final_prompt = f"""
-            Role: Expert Senior Sales Analyst.
+            Role: Expert Enterprise Strategist.
             Target: **{real_company}** (Scope: **{real_unit}**).
             Competitors: {competitors}
             User Context: {context}
             
-            LIVE WEB DATA (Use this Priority #1):
+            RAW WEB DATA:
             {search_dump}
             
-            CRITICAL INSTRUCTIONS:
-            1. **Synthesis Strategy:** Use the Web Data for specific recent numbers (2024/2025).
-            2. **Knowledge Fallback:** If the Web Data is thin (e.g. misses a specific growth %), YOU MUST USE YOUR INTERNAL KNOWLEDGE of {real_company} to fill the gaps.
-               - Example: If search misses "Strategy", use your knowledge that {real_company} focuses on [Known Strategy].
-               - Do NOT say "Data Unavailable" unless absolutely necessary.
-               - Do NOT hallucinate fake numbers, but DO provide "General Strategic Direction" based on your training.
+            INSTRUCTIONS FOR RICHNESS:
+            1. **Expand & Connect:** Do not just list facts. Explain *why* they matter. Connect the web data to your internal knowledge of the company's long-term history and culture.
+            2. **Fill the Gaps:** If the web data is thin on a specific number, use your internal training to describe the *strategic reality* of that unit (e.g., "While 2025 specific targets aren't public, this unit historically drives 40% of revenue through X strategy...").
+            3. **Be Specific:** Name specific drugs, products, regions, or technologies whenever possible.
             
-            REPORT SECTIONS:
+            PRODUCE THIS REPORT:
             
-            SECTION A: Business Health
-            - **Growth Signal**: (e.g. Expanding/Stable). Use internal knowledge if web data is missing.
-            - **Market Position**: Qualitative assessment against {competitors}.
+            ### 1. Business Health & Trajectory
+            * **Growth Reality:** Go beyond "Stable." Are they in a super-cycle? A restructuring phase? A post-COVID slump? Cite revenue trends if available, or infer from industry context.
+            * **Competitive Dynamics:** How do they actually stack up against {competitors}? Who is winning the innovation war?
             
-            SECTION B: Strategic Initiatives (Follow the Money)
-            - List 2-3 likely funded priorities (e.g. Digital Transformation, Capacity Expansion).
-            - **Operational Goal**: Why are they doing this?
+            ### 2. Strategic Initiatives (Follow the Money)
+            * Identify 3 concrete areas where they are spending money (e.g. New Factories, R&D in AI, M&A).
+            * **The "Why":** For each initiative, explain the operational goal. (e.g., "Building a factory in Cork to bypass US tariffs").
             
-            SECTION C: Risks & Financials
-            - **Layoff Radar**: Any known cost-cutting programs in this industry?
-            - **Cash Position**: Investing vs Saving.
+            ### 3. The Risk Landscape
+            * **Financial Pressure:** Are they cash-rich and buying? Or debt-heavy and cutting?
+            * **Operational Friction:** Layoffs, supply chain issues, or leadership exits?
             
-            SECTION D: "Soft Signals"
-            - Hiring trends or leadership focus.
+            ### 4. "Soft Signals" & Culture
+            * What is the leadership vibe? (e.g., "New CEO focused on efficiency" vs "Founder-led innovation").
+            * Hiring/Firing trends.
             
-            Format: Markdown Tables and Bullet Points. Be confident.
+            Format: Comprehensive paragraphs and detailed bullet points. Avoid brevity.
             """
             
             report = run_gemini(final_prompt)
             
             if report:
-                st.markdown(f"### 📊 Analyst Briefing: {real_company}")
+                st.markdown(f"### 📊 Deep-Dive Analysis: {real_company}")
                 st.markdown(report)
                 
-                with st.expander("🔎 View Source Data"):
-                    st.text(search_dump if search_dump else "No raw data found. Relied on Internal Knowledge.")
+                with st.expander("🔎 Source Data Used"):
+                    st.text(search_dump if search_dump else "Relied on Internal Knowledge.")
             else:
                 st.error("AI generation failed.")
