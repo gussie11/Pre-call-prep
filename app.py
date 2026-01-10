@@ -33,7 +33,8 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
-        models = ["models/gemini-2.0-flash-exp", "models/gemini-2.5-flash", "models/gemini-1.5-flash"]
+        # We use 1.5 Pro or Flash as they have good internal knowledge
+        models = ["models/gemini-1.5-pro-latest", "models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
         for m in models:
             try:
                 model = genai.GenerativeModel(m)
@@ -53,18 +54,14 @@ def extract_json(text):
     except: return None
 
 def robust_search(query, max_retries=3):
-    """
-    Tries to search. If it fails or returns empty, waits and retries.
-    """
     with DDGS() as ddgs:
         for attempt in range(max_retries):
             try:
-                # Get results as a list immediately
-                results = [r for r in ddgs.text(query, max_results=5)]
-                if results:
-                    return results
-                time.sleep(1) # Wait 1s before retry
-            except Exception as e:
+                # Get results as a list
+                results = [r for r in ddgs.text(query, max_results=4)]
+                if results: return results
+                time.sleep(0.5)
+            except:
                 time.sleep(1)
                 continue
     return []
@@ -80,17 +77,15 @@ if st.session_state.step == 1:
     if st.button("Find Account", type="primary"):
         if not api_key: st.error("❌ Need API Key"); st.stop()
             
-        with st.spinner(f"Scanning global entities for '{company_input}'..."):
-            # 1. Search
-            q = f"{company_input} distinct legal entities headquarters business units"
+        with st.spinner(f"Scanning entities for '{company_input}'..."):
+            # SEARCH TRICK: Look for investor relations pages specifically
+            q = f"{company_input} investor relations distinct legal entities headquarters"
             results = robust_search(q)
             search_text = str(results)
             
-            # 2. Analyze
             prompt = f"""
-            Task: Identify ALL distinct major corporate entities named '{company_input}'.
-            Context: The user needs to distinguish between companies like Merck US vs Merck KGaA.
-            
+            Task: Identify major corporate entities named '{company_input}'.
+            Context: Distinguish between similar companies (e.g. Merck US vs Merck Germany).
             Search Data: {search_text}
             
             OUTPUT: JSON list ONLY.
@@ -105,7 +100,7 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("No distinct entities found. Try adding the HQ location.")
+                st.error("No distinct entities found.")
 
 # STEP 2: DEEP DIVE
 if st.session_state.step == 2:
@@ -120,9 +115,8 @@ if st.session_state.step == 2:
         idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
         real_company = opts[idx]['name']
     with col2:
-        # FORCE "ALL" OPTION HERE
+        # "All" Option + Units
         raw_units = opts[idx].get('units', [])
-        # We insert "All / Full Company" at the top of the list
         combined_units = ["All / Full Company Overview"] + raw_units
         real_unit = st.selectbox("Select Business Unit:", combined_units)
 
@@ -135,39 +129,33 @@ if st.session_state.step == 2:
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
         with st.spinner(f"Analyzing {real_company}..."):
             
-            # 1. SMART QUERY BUILDER
+            # 1. TARGETED SEARCH (BETTER QUERIES)
             search_dump = ""
+            
+            # Use 'site:' operator to force official data sources if possible
+            # We assume company name is unique enough, or we use the specific name found in Step 1
             if "All" in real_unit:
-                # Corporate Level Search
                 queries = [
-                    f"{real_company} investor relations annual report 2024 2025 strategy",
-                    f"{real_company} revenue growth outlook 2025 financial results",
-                    f"{real_company} corporate restructuring layoffs risks 2025"
+                    f"{real_company} investor relations presentation 2024 2025",
+                    f"{real_company} annual report 2024 strategic priorities",
+                    f"{real_company} financial results Q3 2024 revenue growth",
+                    f"{real_company} restructuring layoffs cost savings 2025"
                 ]
             else:
-                # Unit Level Search
                 queries = [
-                    f"{real_company} {real_unit} revenue growth financial results 2024 2025",
-                    f"{real_company} {real_unit} strategic priorities investments 2025",
-                    f"{real_company} {real_unit} layoffs restructuring risks 2025"
+                    f"{real_company} {real_unit} revenue organic growth 2024",
+                    f"{real_company} {real_unit} strategic focus areas 2025",
+                    f"{real_company} {real_unit} competitor market share analysis"
                 ]
             
-            found_data = False
             for q in queries:
                 res = robust_search(q)
                 if res:
-                    found_data = True
                     search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
-            
-            # Fallback
-            if not found_data:
-                fallback_q = f"{real_company} annual report 2024 business strategy"
-                res = robust_search(fallback_q)
-                search_dump += f"\nFallback Data: {str(res)}\n"
 
-            # 2. HYBRID INTELLIGENCE PROMPT
+            # 2. THE "ANALYST INSTINCT" PROMPT
             final_prompt = f"""
-            Role: Senior Market Intelligence Analyst.
+            Role: Expert Senior Sales Analyst.
             Target: **{real_company}** (Scope: **{real_unit}**).
             Competitors: {competitors}
             User Context: {context}
@@ -175,27 +163,31 @@ if st.session_state.step == 2:
             LIVE WEB DATA (Use this Priority #1):
             {search_dump}
             
-            INSTRUCTIONS:
-            1. Analyze the web data to write a Competitive Briefing.
-            2. **HYBRID BACKUP:** If the web data is missing specific details (like specific 2025 revenue), use your **INTERNAL KNOWLEDGE** of this company to fill in the context (e.g., their known historical strategy, typical risks, or market position).
-            3. **Do NOT** say "I cannot answer." If data is thin, make reasonable strategic inferences based on the industry.
+            CRITICAL INSTRUCTIONS:
+            1. **Synthesis Strategy:** Use the Web Data for specific recent numbers (2024/2025).
+            2. **Knowledge Fallback:** If the Web Data is thin (e.g. misses a specific growth %), YOU MUST USE YOUR INTERNAL KNOWLEDGE of {real_company} to fill the gaps.
+               - Example: If search misses "Strategy", use your knowledge that {real_company} focuses on [Known Strategy].
+               - Do NOT say "Data Unavailable" unless absolutely necessary.
+               - Do NOT hallucinate fake numbers, but DO provide "General Strategic Direction" based on your training.
+            
+            REPORT SECTIONS:
             
             SECTION A: Business Health
-            - **Growth Signal**: Expanding, Stable, or Struggling? (Cite Web Data if available).
-            - **Market Position**: Gaining or losing share?
+            - **Growth Signal**: (e.g. Expanding/Stable). Use internal knowledge if web data is missing.
+            - **Market Position**: Qualitative assessment against {competitors}.
             
             SECTION B: Strategic Initiatives (Follow the Money)
-            - List 2-3 funded priorities (e.g. "New Factory in X", "AI Investment").
-            - **Operational Goal**: What metric are they improving?
+            - List 2-3 likely funded priorities (e.g. Digital Transformation, Capacity Expansion).
+            - **Operational Goal**: Why are they doing this?
             
             SECTION C: Risks & Financials
-            - **Layoff Radar**: Any restructuring or cost-cutting?
-            - **Cash Position**: Investing or saving?
+            - **Layoff Radar**: Any known cost-cutting programs in this industry?
+            - **Cash Position**: Investing vs Saving.
             
             SECTION D: "Soft Signals"
-            - Leadership changes or hiring focuses.
+            - Hiring trends or leadership focus.
             
-            Format: Markdown Tables and Bullet Points. Concise.
+            Format: Markdown Tables and Bullet Points. Be confident.
             """
             
             report = run_gemini(final_prompt)
@@ -204,7 +196,7 @@ if st.session_state.step == 2:
                 st.markdown(f"### 📊 Analyst Briefing: {real_company}")
                 st.markdown(report)
                 
-                with st.expander("🔎 View Source Data (Verify Results)"):
-                    st.text(search_dump if search_dump else "No raw data found. Used Internal Knowledge.")
+                with st.expander("🔎 View Source Data"):
+                    st.text(search_dump if search_dump else "No raw data found. Relied on Internal Knowledge.")
             else:
                 st.error("AI generation failed.")
