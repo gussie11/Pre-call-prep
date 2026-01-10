@@ -36,27 +36,14 @@ def run_gemini(prompt):
     if not api_key: return None, "No API Key"
     try:
         genai.configure(api_key=api_key)
-        # UPDATED MODEL LIST: Prioritizing the models you definitely have access to
-        models = [
-            "models/gemini-2.0-flash-exp", 
-            "models/gemini-2.5-flash", 
-            "models/gemini-1.5-pro", 
-            "models/gemini-1.5-pro-latest", 
-            "models/gemini-1.5-flash"
-        ]
-        
-        errors = []
+        # 1.5 Pro is essential for analyzing complex press releases
+        models = ["models/gemini-1.5-pro", "models/gemini-1.5-pro-latest", "models/gemini-1.5-flash"]
         for m in models:
             try:
                 model = genai.GenerativeModel(m)
-                response = model.generate_content(prompt)
-                return response.text, None # Success
-            except Exception as e:
-                errors.append(f"{m}: {str(e)}")
-                continue
-        
-        return None, errors # Return all errors if all failed
-        
+                return model.generate_content(prompt).text, None
+            except: continue
+        return None, "All models failed"
     except Exception as e:
         return None, str(e)
 
@@ -69,21 +56,30 @@ def extract_json(text):
     except: return None
 
 def robust_search(query, max_retries=2):
+    """
+    Search that returns Title + Link + Snippet for verification.
+    """
     with DDGS() as ddgs:
-        for attempt in range(max_retries):
-            try:
-                results = [r for r in ddgs.text(query, max_results=10)]
-                if results: return results
-                time.sleep(0.5)
-            except:
-                time.sleep(1)
-                continue
+        try:
+            # We fetch 10 results to dig deep for PDFs and Press Releases
+            results = [r for r in ddgs.text(query, max_results=10)]
+            if results: return results
+        except: pass
+        
+        # Fallback
+        time.sleep(1)
+        try:
+            results = [r for r in ddgs.text(query + " news", max_results=8)]
+            if results: return results
+        except: pass
     return []
 
 # --- APP FLOW ---
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
+# ==========================================
 # STEP 1: IDENTIFICATION
+# ==========================================
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
     
@@ -103,12 +99,16 @@ if st.session_state.step == 1:
         if not api_key: st.error("❌ Need API Key"); st.stop()
         
         with st.spinner(f"Scanning for '{company_input}'..."):
-            # 1. Search
+            # 1. Search (Broad)
             q = f"{company_input} corporate structure business units investor relations"
             results = robust_search(q)
             search_text = str(results)
-            
-            # 2. Analyze
+
+            if not results:
+                st.error(f"Search found 0 results for '{company_input}'. Try the 'Skip' button.")
+                st.stop()
+
+            # 2. AI Parsing
             prompt = f"""
             Task: Extract corporate entities for '{company_input}' from: {search_text}
             
@@ -119,7 +119,7 @@ if st.session_state.step == 1:
             [ {{ "name": "Legal Name", "description": "HQ/Type", "units": ["Unit 1", "Unit 2"] }} ]
             """
             
-            response_text, error_msg = run_gemini(prompt)
+            response_text, error = run_gemini(prompt)
             data = extract_json(response_text) if response_text else None
             
             if data:
@@ -127,12 +127,11 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("AI could not parse the data.")
-                if error_msg:
-                    with st.expander("View Error Log"):
-                        st.write(error_msg)
+                st.error("AI couldn't parse the data. Use 'Skip & Enter Manually'.")
 
-# STEP 2: DEEP DIVE
+# ==========================================
+# STEP 2: DEEP DIVE (Source Hunter Mode)
+# ==========================================
 if st.session_state.step == 2:
     st.subheader("Step 2: Confirm Scope")
     
@@ -163,73 +162,71 @@ if st.session_state.step == 2:
         context = c2.text_input("Your Goal", placeholder="e.g. Selling Lab Automation")
 
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
-        with st.spinner(f"Running 'Zero-Fluff' Analysis for {real_company}..."):
+        with st.spinner(f"Hunting for official data on {real_company}..."):
             
-            # 1. SEARCH
-            search_dump = ""
-            if "All" in real_unit or st.session_state.get("manual_entry"):
-                queries = [
-                    f"{real_company} investor presentation 2024 2025 strategic priorities",
-                    f"{real_company} annual report 2024 revenue growth outlook",
-                    f"{real_company} leadership team CEO management changes 2024 2025",
-                    f"{real_company} restructuring layoffs new facility investment 2025",
-                    f"{real_company} major customers partnerships case studies"
-                ]
-            else:
-                queries = [
-                    f"{real_company} {real_unit} revenue growth market share 2024",
-                    f"{real_company} {real_unit} strategic initiatives new products 2025",
-                    f"{real_company} {real_unit} competitors comparison {competitors}",
-                    f"{real_company} {real_unit} leadership management team"
-                ]
+            # 1. INTELLIGENT "SOURCE HUNTING"
+            # We specifically target "Press Releases", "PDFs" (Reports), and "News"
+            
+            search_context = ""
+            
+            # A. The "Official" Docs (Public or Private)
+            queries = [
+                f"{real_company} press release 2024 2025 new facility expansion",
+                f"{real_company} press release 2024 2025 acquisition partnership",
+                f"{real_company} annual report 2024 strategic priorities filetype:pdf", # Try to find PDFs
+                f"{real_company} leadership team CEO appointment 2024 2025"
+            ]
+            
+            # B. Unit Specific (if selected)
+            if "All" not in real_unit:
+                queries.append(f"{real_company} {real_unit} revenue growth market share")
+            
+            all_results = []
             
             for q in queries:
                 res = robust_search(q)
                 if res:
-                    search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
+                    for item in res:
+                        # We format the result to emphasize the SOURCE URL
+                        entry = f"SOURCE: {item.get('title')} ({item.get('href')})\nCONTENT: {item.get('body')}\n"
+                        search_context += entry + "\n"
+                        all_results.append(item)
 
-            # 2. MEGA PROMPT
+            # 2. THE "SOURCE-TRUTH" PROMPT
             final_prompt = f"""
             Role: Senior Market Intelligence Analyst.
-            Task: Produce a "Zero-Fluff" competitive briefing for **{real_company}** (Unit: **{real_unit}**).
+            Task: Competitive briefing for **{real_company}** (Unit: **{real_unit}**).
             Context: {context}
             Competitors: {competitors}
             
-            RAW WEB DATA (Priority #1):
-            {search_dump}
+            RAW SEARCH DATA (Includes Links):
+            {search_context}
             
-            CRITICAL INSTRUCTION:
-            1. Use Web Data for recent numbers (2024/2025).
-            2. **MISSING DATA FALLBACK:** If web data is thin, USE YOUR INTERNAL KNOWLEDGE to fill gaps. 
-               - Estimate strategic trajectory based on industry norms.
-               - Do NOT say "Data Unavailable" unless absolutely necessary.
+            INSTRUCTIONS:
+            1. **Prioritize Official Sources:** Look at the "SOURCE" lines. Trust data from the company's own website or major PR wires (BusinessWire, PR Newswire) above generic blogs.
+            2. **Find the "Real" News:** Look for specific mentions of **New Facilities**, **Acquisitions**, or **Leadership Changes** in the text.
+            3. **Private Company Handling:** If {real_company} is private (no stock data), focus purely on these "Growth Signals" (hiring, building, buying) rather than revenue $.
+            4. **Gap Filling:** If specific data is missing, use your INTERNAL KNOWLEDGE to explain the *general* strategy of this company, but label it "Strategic Inference."
             
-            GENERATE THIS REPORT:
+            GENERATE REPORT:
             
-            ### Section A: Business Unit Health & Competitor Mapping
-            | Metric | Assessment | Signal |
-            | :--- | :--- | :--- |
-            | **Growth** | (e.g. "Aggressive", "Stable") | Cited Revenue % or Strategic Inference. |
-            | **Market Share** | Gaining/Losing vs {competitors}? | Primary Threat. |
+            ### Section A: Business Health & Signals
+            * **Growth Signal:** (e.g. "Expansion Phase"). Cite the specific Facility or M&A deal if found in the search data.
+            * **Market Position:** Niche Specialist or Volume Leader?
             
-            ### Section B: Main Customers & Markets
-            * **Key Segments:** Who do they sell to?
-            * **Reference Customers:** Specific names or likely client types.
-            * **Buying Behavior:** Why do they buy?
-            
-            ### Section C: Strategic Initiatives
+            ### Section B: Strategic Initiatives (Follow the Money)
             Identify 2-3 "Funded" Priorities.
-            * **Initiative:** (e.g. "New Factory", "Acquisition").
-            * **Goal:** What metric are they changing?
+            * **Initiative:** (e.g. "New Site in RTP").
+            * **Evidence:** (e.g. "Announced in 2024 Press Release").
+            * **Goal:** Why are they doing this?
             
-            ### Section D: Financial & Risk Reality
-            * **Cash/Capex:** Investing or saving?
-            * **Layoff Radar:** Restructuring/WARN notices?
-            * **Risk Factors:** Top risks.
+            ### Section C: Leadership & Ownership
+            * **Ownership:** Who owns them? (PE Firm? Public?).
+            * **Key People:** CEO/CSO names found in the data.
             
-            ### Section E: "Soft Signal" Sentiment
-            * **Leadership:** Key names (CEO, Heads).
-            * **Culture/Hiring:** Hiring trends?
+            ### Section D: Risks & Friction
+            * **Operational:** Integration risks? Staffing new sites?
+            * **Financial:** PE Exit pressure?
             
             Format: Markdown tables.
             """
@@ -239,10 +236,15 @@ if st.session_state.step == 2:
             if report_text:
                 st.markdown(f"### 📊 Analyst Briefing: {real_company}")
                 st.markdown(report_text)
-                with st.expander("🔎 View Source Data"):
-                    st.text(search_dump if search_dump else "Relied on Internal Knowledge.")
+                
+                # SHOW THE SOURCES (Transparency)
+                with st.expander("🔗 Verified Sources (Click to Read)"):
+                    if all_results:
+                        for item in all_results[:5]: # Show top 5 distinct sources
+                            st.markdown(f"- [{item.get('title')}]({item.get('href')})")
+                    else:
+                        st.write("No direct links found. Analysis based on internal knowledge.")
             else:
                 st.error("AI generation failed.")
                 if error_msg:
-                    with st.expander("View Debug Logs"):
-                        st.write(error_msg)
+                    with st.expander("Debug"): st.write(error_msg)
