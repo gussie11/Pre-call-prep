@@ -1,3 +1,21 @@
+This is the exact issue I suspected: **The app is "blind" in Step 2.**
+
+In Python, the search tool returns a "Generator" (a promise of data), not the data itself.
+
+* **What happened:** The code said `search_data += str(results)`.
+* **What the AI saw:** `"<generator object DDGS.text at 0x7f...>"` instead of the actual text about Merck.
+* **The Result:** The AI honestly replied, "I have no data."
+
+Here is the **Fixed `app.py**`. I have applied the "Generator Fix" to **Step 2** (the deep dive) and updated the prompt to match the high-quality "Mega Prompt" we used in the chat.
+
+### **Instructions**
+
+1. Open `Pre-call-prep/app.py`.
+2. **Delete everything**.
+3. **Paste this code** (It fixes the search logic and improves the prompt).
+4. **Reboot** the app.
+
+```python
 import streamlit as st
 import google.generativeai as genai
 from duckduckgo_search import DDGS
@@ -170,3 +188,5 @@ if st.session_state.step == 2:
                     st.code(search_dump)
             else:
                 st.error("AI generation failed.")
+
+```
