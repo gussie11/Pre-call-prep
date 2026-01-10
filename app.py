@@ -20,97 +20,121 @@ with st.sidebar:
         st.session_state.step = 1
         st.rerun()
 
-# --- 2. THE FACT HUNTER ---
+# --- 2. HELPER: CONNECT TO ANY WORKING MODEL ---
+def get_gemini_response(prompt):
+    """
+    Tries multiple model names until one works. 
+    Prioritizes the 2.x models you have access to.
+    """
+    if not api_key: return "❌ No API Key found."
+    
+    genai.configure(api_key=api_key)
+    
+    # The list of models to try, in order of preference
+    # Based on your previous logs, you have access to the 2.x series.
+    candidates = [
+        "models/gemini-2.5-pro",
+        "models/gemini-2.5-flash",
+        "models/gemini-2.0-flash-exp",
+        "models/gemini-1.5-pro-latest",
+        "models/gemini-1.5-pro",
+        "gemini-1.5-pro"
+    ]
+    
+    last_error = ""
+    for model_name in candidates:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            last_error = str(e)
+            continue # Try the next one
+            
+    return f"❌ All models failed. Last error: {last_error}"
+
+# --- 3. THE FACT HUNTER ---
 def get_facts(company):
     """
     Hunts for the specific data points seen in your good example.
     """
     raw_data = ""
     with DDGS() as ddgs:
-        # We run 4 specific searches to populate the table sections
         queries = [
-            # For Section A (Competitors)
-            f"{company} competitors CRO testing market share",
-            # For Section B (Customers)
+            # Section A (Competitors & Market)
+            f"{company} competitors CRO market share",
+            f"{company} services market position vs Eurofins SGS",
+            # Section B (Customers)
             f"{company} strategic partnership press release 2024 2025",
-            # For Section C (Initiatives - specifically looking for RTP/Vertex)
+            f"{company} client case study pharma biotech",
+            # Section C (Initiatives - looking for RTP/Vertex)
             f"{company} new facility expansion North Carolina RTP",
             f"{company} Vertex Pharmaceuticals agreement details",
-            # For Section E (Leadership)
+            # Section E (Leadership & Ownership)
             f"{company} CEO appointment Archie Cullen",
-            f"{company} acquisition news private equity"
+            f"{company} acquisition Water Street JLL Partners"
         ]
         
         status = st.status(f"🕵️‍♂️ Mirroring ChatGPT's research on {company}...", expanded=True)
         
         for q in queries:
             try:
-                status.write(f"Searching: {q}...")
-                results = [r for r in ddgs.text(q, max_results=3)]
+                # status.write(f"Searching: {q}...") # Commented out to reduce flicker
+                results = [r for r in ddgs.text(q, max_results=2)]
                 for r in results:
                     raw_data += f"\nSOURCE: {r['title']}\nTEXT: {r['body']}\n"
-                time.sleep(0.3)
+                time.sleep(0.2)
             except: continue
             
         status.update(label="✅ Data Collected", state="complete", expanded=False)
     return raw_data
 
-# --- 3. THE ANALYST ---
+# --- 4. THE ANALYST ---
 def run_analysis(company, unit, data):
-    if not api_key: return "❌ No API Key found."
+    prompt = f"""
+    Role: Senior Market Analyst.
+    Target: {company} (Focus: {unit}).
     
-    try:
-        genai.configure(api_key=api_key)
-        # Use standard 1.5 Pro - it is the most stable
-        model = genai.GenerativeModel("models/gemini-1.5-pro")
-        
-        prompt = f"""
-        Role: Senior Market Analyst.
-        Target: {company} (Focus: {unit}).
-        
-        RAW INTELLIGENCE FOUND:
-        {data}
-        
-        TASK: Produce a briefing EXACTLY matching this structure. 
-        If data is private/missing, write "N/A" just like a real analyst would. Do not hallucinate numbers.
-        
-        REQUIRED OUTPUT FORMAT:
-        
-        ## Section A: Business Unit Health & Competitor Mapping
-        | Metric | {unit} Status |
-        | :--- | :--- |
-        | **Performance** | (e.g. "N/A (Private)" or "Organic Growth X%") |
-        | **Direct Competitors** | List 2-3 rivals (e.g. Eurofins, SGS). |
-        | **Market Share** | Assessment vs Rivals. |
+    RAW INTELLIGENCE FOUND:
+    {data}
+    
+    TASK: Produce a briefing EXACTLY matching this structure. 
+    If data is private/missing, write "N/A" just like a real analyst would. Do not hallucinate numbers.
+    
+    REQUIRED OUTPUT FORMAT:
+    
+    ## Section A: Business Unit Health & Competitor Mapping
+    | Metric | {unit} Status |
+    | :--- | :--- |
+    | **Performance** | (e.g. "N/A (Private)" or "Organic Growth X%") |
+    | **Direct Competitors** | List 2-3 rivals (e.g. Eurofins, SGS). |
+    | **Market Share** | Assessment vs Rivals. |
 
-        ## Section B: Main Customers & Markets
-        * **Key Segments:** Who pays? (e.g. Pharma, Biotech).
-        * **Reference Customers:** (Look for "Vertex", "Moderna", etc. in the text).
-        * **Buying Behavior:** Why do they choose {company}? (e.g. "GMP Release Readiness").
+    ## Section B: Main Customers & Markets
+    * **Key Segments:** Who pays? (e.g. Pharma, Biotech).
+    * **Reference Customers:** (Look for "Vertex", "Moderna", etc. in the text).
+    * **Buying Behavior:** Why do they choose {company}? (e.g. "GMP Release Readiness").
 
-        ## Section C: Strategic Initiatives (Funded Priorities)
-        *Find specific projects in the text (like "RTP Center" or "Digital Operations").*
-        | Initiative | Evidence | Operational Goal |
-        | :--- | :--- | :--- |
-        | (Name) | (Source/Date) | (What metric does it improve?) |
+    ## Section C: Strategic Initiatives (Funded Priorities)
+    *Find specific projects in the text (like "RTP Center" or "Digital Operations").*
+    | Initiative | Evidence | Operational Goal |
+    | :--- | :--- | :--- |
+    | (Name) | (Source/Date) | (What metric does it improve?) |
 
-        ## Section D: Financial & Risk Reality
-        * **Cash/Capex:** (e.g. "N/A (Private)" or details if found).
-        * **Layoff Radar:** Any recent cuts?
-        
-        ## Section E: "Soft Signal" Sentiment
-        | Signal | Evidence | Implication |
-        | :--- | :--- | :--- |
-        | **Leadership** | (e.g. Archie Cullen appointed CEO) | (Continuity/Growth?) |
-        | **Hiring/Footprint** | (e.g. RTP Facility ~200 jobs) | (Scaling Capacity) |
-        """
-        
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"❌ Error: {str(e)}"
+    ## Section D: Financial & Risk Reality
+    * **Cash/Capex:** (e.g. "N/A (Private)" or details if found).
+    * **Layoff Radar:** Any recent cuts?
+    
+    ## Section E: "Soft Signal" Sentiment
+    | Signal | Evidence | Implication |
+    | :--- | :--- | :--- |
+    | **Leadership** | (e.g. Archie Cullen appointed CEO) | (Continuity/Growth?) |
+    | **Hiring/Footprint** | (e.g. RTP Facility ~200 jobs) | (Scaling Capacity) |
+    """
+    
+    return get_gemini_response(prompt)
 
-# --- 4. UI ---
+# --- 5. UI ---
 st.title("📊 360° Analyst (Mirror Mode)")
 
 col1, col2 = st.columns(2)
