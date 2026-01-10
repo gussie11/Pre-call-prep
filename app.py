@@ -36,6 +36,7 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
+        # Priority: 1.5 Pro (Best Logic) -> 1.5 Flash (Fastest)
         models = ["models/gemini-1.5-pro", "models/gemini-1.5-pro-latest", "models/gemini-1.5-flash"]
         for m in models:
             try:
@@ -47,18 +48,21 @@ def run_gemini(prompt):
     return None
 
 def extract_json(text):
-    """Aggressive JSON extraction."""
+    """Robust JSON extraction that ignores chatty prefixes."""
     try:
-        # Remove markdown code blocks
+        # Strip markdown code blocks
         text = re.sub(r"```json|```", "", text).strip()
-        # Find the main list [ ... ]
+        # Regex to find the main list [ ... ]
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match: return json.loads(match.group(0))
         return json.loads(text)
     except: return None
 
 def robust_search(query, max_retries=2):
-    """Tries primary query, then simpler fallback if empty."""
+    """
+    CRITICAL FIX: Forces the generator to become a list immediately.
+    Retries with simpler query if the first one fails.
+    """
     with DDGS() as ddgs:
         # Attempt 1: The specific query
         try:
@@ -80,7 +84,7 @@ def robust_search(query, max_retries=2):
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
 # ==========================================
-# STEP 1: IDENTIFICATION (With Manual Override)
+# STEP 1: IDENTIFICATION (With Fail-Safe)
 # ==========================================
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
@@ -91,6 +95,7 @@ if st.session_state.step == 1:
     with col_manual:
         st.write("") # Spacer
         st.write("") 
+        # FAIL-SAFE BUTTON: Bypasses search if it keeps failing
         if st.button("Skip & Enter Manually"):
             st.session_state.manual_entry = True
             st.session_state.entity_options = [{"name": company_input if company_input else "Target Company", "description": "Manual Entry", "units": ["General / All Units"]}]
@@ -106,7 +111,7 @@ if st.session_state.step == 1:
             results = robust_search(q)
             search_text = str(results)
 
-            # Debug Expander to see if search is working
+            # Debug Expander (So you can see if DuckDuckGo is blocking us)
             with st.expander("🕵️‍♂️ Debug: View Raw Search Results"):
                 st.write(results if results else "No results found.")
 
