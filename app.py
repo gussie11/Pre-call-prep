@@ -6,7 +6,7 @@ import re
 import time
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Sales Prep Analyst", page_icon="🕵️‍♂️", layout="wide")
+st.set_page_config(page_title="Sales Prep Analyst", page_icon="⚡", layout="wide")
 
 if "step" not in st.session_state: st.session_state.step = 1
 if "entity_options" not in st.session_state: st.session_state.entity_options = []
@@ -29,20 +29,38 @@ with st.sidebar:
 # --- 2. HELPER FUNCTIONS ---
 def run_gemini(prompt):
     if not api_key: return None, "No API Key"
+    
     try:
         genai.configure(api_key=api_key)
-        models = ["models/gemini-1.5-pro", "models/gemini-1.5-pro-latest", "models/gemini-1.5-flash"]
-        for m in models:
+        
+        # EXTENSIVE Model List (Tries them all until one works)
+        models_to_try = [
+            "models/gemini-1.5-pro",
+            "gemini-1.5-pro",
+            "models/gemini-1.5-flash",
+            "gemini-1.5-flash",
+            "models/gemini-2.0-flash-exp",
+            "gemini-pro"
+        ]
+        
+        last_error = ""
+        for m in models_to_try:
             try:
                 model = genai.GenerativeModel(m)
-                return model.generate_content(prompt).text, None
-            except: continue
-        return None, "All models failed"
+                response = model.generate_content(prompt)
+                return response.text, None # Success!
+            except Exception as e:
+                last_error = str(e)
+                continue # Try next model
+        
+        return None, f"All models failed. Last error: {last_error}"
+        
     except Exception as e:
         return None, str(e)
 
 def extract_json(text):
     try:
+        # aggressive cleanup
         text = re.sub(r"```json|```", "", text).strip()
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match: return json.loads(match.group(0))
@@ -52,64 +70,58 @@ def extract_json(text):
 def robust_search(query, max_results=5):
     with DDGS() as ddgs:
         try:
+            # 1. Try Specific
             results = [r for r in ddgs.text(query, max_results=max_results)]
             if results: return results
         except: pass
+        
         time.sleep(0.5)
+        
         try:
-            # Fallback to simpler query
-            results = [r for r in ddgs.text(query.split(" 20")[0], max_results=max_results)]
+            # 2. Try Broad
+            simple_q = query.split(" 20")[0]
+            results = [r for r in ddgs.text(simple_q, max_results=max_results)]
             if results: return results
         except: pass
     return []
 
 def execute_dragnet(company, unit):
     """
-    Runs parallel search agents on the CONFIRMED target.
+    Runs search agents on the CONFIRMED target.
     """
     raw_text = ""
     
-    # 1. Financials / Structure
+    # Define Queries based on Unit
     if "All" in unit:
-        q_fin = [
+        queries = [
             f"{company} investor relations annual report 2024 2025",
             f"{company} financial results revenue growth 2024",
-            f"{company} corporate structure ownership private equity" # Catch private owners
+            f"{company} corporate structure ownership private equity",
+            f"{company} press release 2024 2025 new facility expansion",
+            f"{company} leadership team CEO appointment 2024"
         ]
     else:
-        q_fin = [
+        queries = [
             f"{company} {unit} revenue growth financial results",
-            f"{company} {unit} market share competitor analysis"
+            f"{company} {unit} market share competitor analysis",
+            f"{company} {unit} strategic priorities 2025",
+            f"{company} {unit} leadership team"
         ]
     
-    # 2. Strategy / News (The "Growth" Signals)
-    q_news = [
-        f"{company} press release 2024 2025 new facility expansion",
-        f"{company} strategic priorities investor presentation 2025",
-        f"{company} acquisition partnership announcement 2025"
-    ]
-    
-    # 3. People / Risk
-    q_risk = [
-        f"{company} leadership team CEO appointment 2024",
-        f"{company} layoffs restructuring cost savings 2025"
-    ]
-
-    all_queries = q_fin + q_news + q_risk
-    
-    # Run the searches
-    for q in all_queries:
+    # Execute
+    for q in queries:
         res = robust_search(q, max_results=4)
         if res:
             for item in res:
-                raw_text += f"\nSOURCE: {item['title']} ({item['href']})\nCONTENT: {item['body']}\n"
+                # Store Source + Body
+                raw_text += f"\nSOURCE: {item.get('title','')} ({item.get('href','')})\nCONTENT: {item.get('body','')}\n"
     
     return raw_text
 
 # --- 3. APP FLOW ---
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
-# STEP 1: IDENTIFICATION (The Gatekeeper)
+# STEP 1: IDENTIFICATION
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
     
@@ -128,8 +140,7 @@ if st.session_state.step == 1:
         if not api_key: st.error("❌ Need API Key"); st.stop()
         
         with st.spinner(f"Scanning for '{company_input}'..."):
-            # Search for Structure
-            q = f"{company_input} corporate structure headquarters business units investor relations"
+            q = f"{company_input} corporate structure headquarters business units"
             results = robust_search(q, max_results=8)
             search_text = str(results)
             
@@ -137,7 +148,7 @@ if st.session_state.step == 1:
                 st.error("No results found. Try Manual Entry.")
                 st.stop()
 
-            # AI Disambiguation
+            # Disambiguation Prompt
             prompt = f"""
             Task: Identify corporate entities for '{company_input}' from: {search_text}
             
@@ -156,9 +167,10 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("AI parsing failed. Try Manual Entry.")
+                st.error("AI parsing failed.")
+                if error: st.code(error)
 
-# STEP 2: DEEP DIVE (The Dragnet)
+# STEP 2: DEEP DIVE
 if st.session_state.step == 2:
     st.subheader("Step 2: Confirm Scope")
     
@@ -189,10 +201,10 @@ if st.session_state.step == 2:
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
         with st.spinner(f"Running Dragnet Search on {real_company}..."):
             
-            # 1. EXECUTE DRAGNET (The Robust Search)
+            # 1. DRAGNET SEARCH
             raw_intel = execute_dragnet(real_company, real_unit)
             
-            # 2. THE MEGA PROMPT (Restored)
+            # 2. MEGA PROMPT
             final_prompt = f"""
             Role: Senior Market Intelligence Analyst.
             Task: Produce a "Zero-Fluff" competitive briefing for **{real_company}** (Unit: **{real_unit}**).
@@ -203,9 +215,8 @@ if st.session_state.step == 2:
             {raw_intel}
             
             CRITICAL INSTRUCTIONS:
-            1. **Hybrid Intelligence:** Use the web data for specific numbers (2024/2025). If web data is missing (common for Private Companies like Solvias), USE YOUR INTERNAL KNOWLEDGE to fill the gaps regarding their strategy, ownership, and reputation.
-            2. **Private Company Logic:** If you see no stock data, look for "Growth Proxies" in the text: New Facilities, Hiring, or Partnerships.
-            3. **Be Specific:** Name the specific facilities (e.g. RTP), drugs, or leaders found.
+            1. **Hybrid Intelligence:** Use web data for 2024/2025 facts. If web data is missing (Private Company), USE INTERNAL KNOWLEDGE to fill gaps on strategy/reputation.
+            2. **Private Company Logic:** If no stock data, look for "Growth Proxies" (New Facilities, Hiring, Partnerships).
             
             GENERATE REPORT:
             
@@ -216,7 +227,7 @@ if st.session_state.step == 2:
             ### Section B: Strategic Initiatives (Follow the Money)
             Identify 2-3 "Funded" Priorities.
             * **Initiative:** (e.g. "New Factory in X").
-            * **Goal:** Why are they doing this? (e.g. "Gene Therapy Expansion").
+            * **Goal:** Why are they doing this?
             
             ### Section C: Leadership & Ownership
             * **Ownership:** PE Firm? Founder? Public?
@@ -238,4 +249,4 @@ if st.session_state.step == 2:
                     st.text(raw_intel if raw_intel else "Relied on Internal Knowledge.")
             else:
                 st.error("AI generation failed.")
-                if error: st.write(error)
+                if error: st.write(f"Debug Info: {error}")
