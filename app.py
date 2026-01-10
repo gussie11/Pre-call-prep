@@ -33,7 +33,6 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
-        # Try best models first
         models = ["models/gemini-2.0-flash-exp", "models/gemini-2.5-flash", "models/gemini-1.5-flash"]
         for m in models:
             try:
@@ -64,7 +63,7 @@ def robust_search(query, max_retries=3):
                 results = [r for r in ddgs.text(query, max_results=5)]
                 if results:
                     return results
-                time.sleep(1) # Wait 1s before retry if empty
+                time.sleep(1) # Wait 1s before retry
             except Exception as e:
                 time.sleep(1)
                 continue
@@ -83,7 +82,7 @@ if st.session_state.step == 1:
             
         with st.spinner(f"Scanning global entities for '{company_input}'..."):
             # 1. Search
-            q = f"{company_input} distinct legal entities headquarters subsidiaries"
+            q = f"{company_input} distinct legal entities headquarters business units"
             results = robust_search(q)
             search_text = str(results)
             
@@ -106,7 +105,7 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("No distinct entities found. Try adding the HQ location (e.g. 'Merck Germany').")
+                st.error("No distinct entities found. Try adding the HQ location.")
 
 # STEP 2: DEEP DIVE
 if st.session_state.step == 2:
@@ -121,7 +120,11 @@ if st.session_state.step == 2:
         idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
         real_company = opts[idx]['name']
     with col2:
-        real_unit = st.selectbox("Select Business Unit:", opts[idx].get('units', ['General']))
+        # FORCE "ALL" OPTION HERE
+        raw_units = opts[idx].get('units', [])
+        # We insert "All / Full Company" at the top of the list
+        combined_units = ["All / Full Company Overview"] + raw_units
+        real_unit = st.selectbox("Select Business Unit:", combined_units)
 
     st.markdown("---")
     with st.expander("Add Deal Context", expanded=True):
@@ -132,15 +135,22 @@ if st.session_state.step == 2:
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
         with st.spinner(f"Analyzing {real_company}..."):
             
-            # 1. ROBUST SEARCH STRATEGY
+            # 1. SMART QUERY BUILDER
             search_dump = ""
-            
-            # Primary Queries (Specific)
-            queries = [
-                f"{real_company} {real_unit} revenue growth financial results 2024 2025",
-                f"{real_company} {real_unit} strategic priorities investments 2025",
-                f"{real_company} {real_unit} layoffs restructuring risks 2025"
-            ]
+            if "All" in real_unit:
+                # Corporate Level Search
+                queries = [
+                    f"{real_company} investor relations annual report 2024 2025 strategy",
+                    f"{real_company} revenue growth outlook 2025 financial results",
+                    f"{real_company} corporate restructuring layoffs risks 2025"
+                ]
+            else:
+                # Unit Level Search
+                queries = [
+                    f"{real_company} {real_unit} revenue growth financial results 2024 2025",
+                    f"{real_company} {real_unit} strategic priorities investments 2025",
+                    f"{real_company} {real_unit} layoffs restructuring risks 2025"
+                ]
             
             found_data = False
             for q in queries:
@@ -149,33 +159,43 @@ if st.session_state.step == 2:
                     found_data = True
                     search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
             
-            # Fallback: If nothing found, try broader queries
+            # Fallback
             if not found_data:
-                st.warning("⚠️ Deep search returned no hits. Trying broader search...")
                 fallback_q = f"{real_company} annual report 2024 business strategy"
                 res = robust_search(fallback_q)
                 search_dump += f"\nFallback Data: {str(res)}\n"
 
-            # 2. STRICT PROMPT
+            # 2. HYBRID INTELLIGENCE PROMPT
             final_prompt = f"""
             Role: Senior Market Intelligence Analyst.
-            Target: **{real_company}** (Specific Unit: **{real_unit}**).
+            Target: **{real_company}** (Scope: **{real_unit}**).
             Competitors: {competitors}
             User Context: {context}
             
-            RAW SEARCH DATA:
+            LIVE WEB DATA (Use this Priority #1):
             {search_dump}
             
             INSTRUCTIONS:
-            1. Analyze the provided data to write a Competitive Briefing.
-            2. **CRITICAL:** If the data is empty or irrelevant, state "Data Unavailable" for that section. DO NOT make up hypothetical numbers.
-            3. Focus on:
-               - **Health:** Growth trends & Market share.
-               - **Strategy:** Funded initiatives (Follow the money).
-               - **Risks:** Layoffs, cuts, cash flow.
-               - **People:** Leadership changes.
+            1. Analyze the web data to write a Competitive Briefing.
+            2. **HYBRID BACKUP:** If the web data is missing specific details (like specific 2025 revenue), use your **INTERNAL KNOWLEDGE** of this company to fill in the context (e.g., their known historical strategy, typical risks, or market position).
+            3. **Do NOT** say "I cannot answer." If data is thin, make reasonable strategic inferences based on the industry.
             
-            Format: Markdown Tables and Bullet Points.
+            SECTION A: Business Health
+            - **Growth Signal**: Expanding, Stable, or Struggling? (Cite Web Data if available).
+            - **Market Position**: Gaining or losing share?
+            
+            SECTION B: Strategic Initiatives (Follow the Money)
+            - List 2-3 funded priorities (e.g. "New Factory in X", "AI Investment").
+            - **Operational Goal**: What metric are they improving?
+            
+            SECTION C: Risks & Financials
+            - **Layoff Radar**: Any restructuring or cost-cutting?
+            - **Cash Position**: Investing or saving?
+            
+            SECTION D: "Soft Signals"
+            - Leadership changes or hiring focuses.
+            
+            Format: Markdown Tables and Bullet Points. Concise.
             """
             
             report = run_gemini(final_prompt)
@@ -184,8 +204,7 @@ if st.session_state.step == 2:
                 st.markdown(f"### 📊 Analyst Briefing: {real_company}")
                 st.markdown(report)
                 
-                # Show sources for verification
                 with st.expander("🔎 View Source Data (Verify Results)"):
-                    st.text(search_dump if search_dump else "No raw data found.")
+                    st.text(search_dump if search_dump else "No raw data found. Used Internal Knowledge.")
             else:
                 st.error("AI generation failed.")
