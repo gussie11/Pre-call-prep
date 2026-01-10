@@ -33,59 +33,57 @@ with st.sidebar:
 
 # --- 4. Helper Functions ---
 def run_gemini(prompt):
-    if not api_key: return None
+    if not api_key: return None, "No API Key"
     try:
         genai.configure(api_key=api_key)
-        # Priority: 1.5 Pro (Best Logic) -> 1.5 Flash (Fastest)
-        models = ["models/gemini-1.5-pro", "models/gemini-1.5-pro-latest", "models/gemini-1.5-flash"]
+        # UPDATED MODEL LIST: Prioritizing the models you definitely have access to
+        models = [
+            "models/gemini-2.0-flash-exp", 
+            "models/gemini-2.5-flash", 
+            "models/gemini-1.5-pro", 
+            "models/gemini-1.5-pro-latest", 
+            "models/gemini-1.5-flash"
+        ]
+        
+        errors = []
         for m in models:
             try:
                 model = genai.GenerativeModel(m)
-                return model.generate_content(prompt).text
-            except: continue
+                response = model.generate_content(prompt)
+                return response.text, None # Success
+            except Exception as e:
+                errors.append(f"{m}: {str(e)}")
+                continue
+        
+        return None, errors # Return all errors if all failed
+        
     except Exception as e:
-        st.error(f"Config Error: {e}")
-    return None
+        return None, str(e)
 
 def extract_json(text):
-    """Robust JSON extraction that ignores chatty prefixes."""
     try:
-        # Strip markdown code blocks
         text = re.sub(r"```json|```", "", text).strip()
-        # Regex to find the main list [ ... ]
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match: return json.loads(match.group(0))
         return json.loads(text)
     except: return None
 
 def robust_search(query, max_retries=2):
-    """
-    CRITICAL FIX: Forces the generator to become a list immediately.
-    Retries with simpler query if the first one fails.
-    """
     with DDGS() as ddgs:
-        # Attempt 1: The specific query
-        try:
-            results = [r for r in ddgs.text(query, max_results=8)]
-            if results: return results
-        except: pass
-        
-        # Attempt 2: Simple query (Fallback)
-        time.sleep(1)
-        try:
-            simple_q = query.split(" ")[0] # Just the company name
-            results = [r for r in ddgs.text(simple_q + " company overview", max_results=8)]
-            if results: return results
-        except: pass
-        
+        for attempt in range(max_retries):
+            try:
+                results = [r for r in ddgs.text(query, max_results=10)]
+                if results: return results
+                time.sleep(0.5)
+            except:
+                time.sleep(1)
+                continue
     return []
 
 # --- APP FLOW ---
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
-# ==========================================
-# STEP 1: IDENTIFICATION (With Fail-Safe)
-# ==========================================
+# STEP 1: IDENTIFICATION
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
     
@@ -93,9 +91,8 @@ if st.session_state.step == 1:
     with col_input:
         company_input = st.text_input("Target Company Name", placeholder="e.g. Solvias, Merck")
     with col_manual:
-        st.write("") # Spacer
         st.write("") 
-        # FAIL-SAFE BUTTON: Bypasses search if it keeps failing
+        st.write("") 
         if st.button("Skip & Enter Manually"):
             st.session_state.manual_entry = True
             st.session_state.entity_options = [{"name": company_input if company_input else "Target Company", "description": "Manual Entry", "units": ["General / All Units"]}]
@@ -110,16 +107,8 @@ if st.session_state.step == 1:
             q = f"{company_input} corporate structure business units investor relations"
             results = robust_search(q)
             search_text = str(results)
-
-            # Debug Expander (So you can see if DuckDuckGo is blocking us)
-            with st.expander("🕵️‍♂️ Debug: View Raw Search Results"):
-                st.write(results if results else "No results found.")
-
-            if not results:
-                st.error(f"Search found 0 results for '{company_input}'. Try the 'Skip' button.")
-                st.stop()
-
-            # 2. AI Parsing
+            
+            # 2. Analyze
             prompt = f"""
             Task: Extract corporate entities for '{company_input}' from: {search_text}
             
@@ -130,25 +119,25 @@ if st.session_state.step == 1:
             [ {{ "name": "Legal Name", "description": "HQ/Type", "units": ["Unit 1", "Unit 2"] }} ]
             """
             
-            response = run_gemini(prompt)
-            data = extract_json(response) if response else None
+            response_text, error_msg = run_gemini(prompt)
+            data = extract_json(response_text) if response_text else None
             
             if data:
                 st.session_state.entity_options = data
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("AI couldn't parse the data. Use 'Skip & Enter Manually'.")
+                st.error("AI could not parse the data.")
+                if error_msg:
+                    with st.expander("View Error Log"):
+                        st.write(error_msg)
 
-# ==========================================
-# STEP 2: DEEP DIVE (Mega Prompt)
-# ==========================================
+# STEP 2: DEEP DIVE
 if st.session_state.step == 2:
     st.subheader("Step 2: Confirm Scope")
     
     opts = st.session_state.entity_options
     
-    # If Manual Entry, just show simple text inputs
     if st.session_state.get("manual_entry"):
         st.info("⚠️ Manual Mode Active")
         col1, col2 = st.columns(2)
@@ -157,7 +146,6 @@ if st.session_state.step == 2:
         with col2:
             real_unit = st.text_input("Business Unit / Focus Area:", value="General Overview")
     else:
-        # Standard Selectors
         col1, col2 = st.columns(2)
         with col1:
             names = [f"{o['name']} ({o['description']})" for o in opts]
@@ -177,10 +165,8 @@ if st.session_state.step == 2:
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
         with st.spinner(f"Running 'Zero-Fluff' Analysis for {real_company}..."):
             
-            # 1. TARGETED SEARCH
+            # 1. SEARCH
             search_dump = ""
-            
-            # "All" or Manual Mode -> Broad Search
             if "All" in real_unit or st.session_state.get("manual_entry"):
                 queries = [
                     f"{real_company} investor presentation 2024 2025 strategic priorities",
@@ -202,7 +188,7 @@ if st.session_state.step == 2:
                 if res:
                     search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
 
-            # 2. THE MEGA PROMPT
+            # 2. MEGA PROMPT
             final_prompt = f"""
             Role: Senior Market Intelligence Analyst.
             Task: Produce a "Zero-Fluff" competitive briefing for **{real_company}** (Unit: **{real_unit}**).
@@ -212,10 +198,10 @@ if st.session_state.step == 2:
             RAW WEB DATA (Priority #1):
             {search_dump}
             
-            CRITICAL INSTRUCTION (The "Hybrid" Rule):
-            1. Use the Web Data for specific recent numbers (2024/2025).
-            2. **MISSING DATA FALLBACK:** If web data is thin (e.g. for private companies like Solvias), USE YOUR INTERNAL KNOWLEDGE to fill the gaps.
-               - Example: If you can't find specific 2025 revenue, estimate the *Strategic Trajectory* based on your training (e.g. "Likely expanding in gene therapy").
+            CRITICAL INSTRUCTION:
+            1. Use Web Data for recent numbers (2024/2025).
+            2. **MISSING DATA FALLBACK:** If web data is thin, USE YOUR INTERNAL KNOWLEDGE to fill gaps. 
+               - Estimate strategic trajectory based on industry norms.
                - Do NOT say "Data Unavailable" unless absolutely necessary.
             
             GENERATE THIS REPORT:
@@ -223,38 +209,40 @@ if st.session_state.step == 2:
             ### Section A: Business Unit Health & Competitor Mapping
             | Metric | Assessment | Signal |
             | :--- | :--- | :--- |
-            | **Growth** | (e.g. "Aggressive", "Stable", "Struggling") | Cited Revenue % or Strategic Inference. |
-            | **Market Share** | Gaining/Losing vs {competitors}? | Primary Threat identified. |
+            | **Growth** | (e.g. "Aggressive", "Stable") | Cited Revenue % or Strategic Inference. |
+            | **Market Share** | Gaining/Losing vs {competitors}? | Primary Threat. |
             
-            ### Section B: Main Customers & Markets (Who pays the bills?)
-            * **Key Segments:** Who are they selling to? (e.g. Big Pharma, Biotech, Academia).
-            * **Reference Customers:** List specific names if found (e.g. Pfizer, Vertex) OR infer likely client types based on their services.
-            * **Buying Behavior:** Why do they buy? (e.g. "Buying for Speed" vs "Buying for Compliance").
+            ### Section B: Main Customers & Markets
+            * **Key Segments:** Who do they sell to?
+            * **Reference Customers:** Specific names or likely client types.
+            * **Buying Behavior:** Why do they buy?
             
-            ### Section C: Strategic Initiatives (Follow the Money)
+            ### Section C: Strategic Initiatives
             Identify 2-3 "Funded" Priorities.
-            * **Initiative:** (e.g. "New Factory in X", "Acquisition of Y").
-            * **Operational Goal:** What metric are they changing? (e.g. "Increase capacity").
+            * **Initiative:** (e.g. "New Factory", "Acquisition").
+            * **Goal:** What metric are they changing?
             
             ### Section D: Financial & Risk Reality
-            * **Cash/Capex:** Investing heavily or cost-cutting?
-            * **Layoff Radar:** Any restructuring/WARN notices?
-            * **Risk Factors:** Top risks (e.g. Supply Chain, Regulatory).
+            * **Cash/Capex:** Investing or saving?
+            * **Layoff Radar:** Restructuring/WARN notices?
+            * **Risk Factors:** Top risks.
             
             ### Section E: "Soft Signal" Sentiment
-            * **Leadership:** Key names (CEO, Heads of Unit).
-            * **Culture/Hiring:** Are they hiring for sales/R&D?
+            * **Leadership:** Key names (CEO, Heads).
+            * **Culture/Hiring:** Hiring trends?
             
-            Format: Strict Markdown tables. Bullet points must be concise.
+            Format: Markdown tables.
             """
             
-            report = run_gemini(final_prompt)
+            report_text, error_msg = run_gemini(final_prompt)
             
-            if report:
+            if report_text:
                 st.markdown(f"### 📊 Analyst Briefing: {real_company}")
-                st.markdown(report)
-                
+                st.markdown(report_text)
                 with st.expander("🔎 View Source Data"):
                     st.text(search_dump if search_dump else "Relied on Internal Knowledge.")
             else:
                 st.error("AI generation failed.")
+                if error_msg:
+                    with st.expander("View Debug Logs"):
+                        st.write(error_msg)
