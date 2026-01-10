@@ -2,21 +2,19 @@ import streamlit as st
 import google.generativeai as genai
 from duckduckgo_search import DDGS
 import json
-import re
 
 # --- 1. Page Config ---
 st.set_page_config(page_title="Sales Prep Analyst", page_icon="🕵️‍♂️", layout="wide")
 
-# --- 2. Session State Setup ---
+# --- 2. Session State ---
 if "step" not in st.session_state:
     st.session_state.step = 1
 if "entity_options" not in st.session_state:
     st.session_state.entity_options = []
 
-# --- 3. Sidebar & API Key ---
+# --- 3. Sidebar ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    
     if "GOOGLE_API_KEY" in st.secrets:
         st.success("✅ Key loaded from Secrets")
         api_key = st.secrets["GOOGLE_API_KEY"]
@@ -28,199 +26,147 @@ with st.sidebar:
         st.session_state.entity_options = []
         st.rerun()
 
-# --- 4. Helper Function: Robust Gemini Call ---
+# --- 4. Helper: Gemini Call ---
 def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
     except Exception as e:
-        st.error(f"Configuration Error: {e}")
+        st.error(f"Config Error: {e}")
         return None
 
-    models_to_try = [
-        "models/gemini-2.0-flash-exp", # Try the newest first
-        "models/gemini-2.5-flash", 
-        "models/gemini-1.5-flash",
-        "models/gemini-pro"
-    ]
-    
-    for m in models_to_try:
+    models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
+    for m in models:
         try:
             model = genai.GenerativeModel(m)
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception:
-            continue
+            return model.generate_content(prompt).text
+        except: continue
     return None
 
-# --- APP INTERFACE ---
-
+# --- APP FLOW ---
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
-# ==========================================
-# STEP 1: SEARCH & IDENTIFY (The Fix is Here)
-# ==========================================
+# STEP 1: SMART SEARCH (JSON)
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
-    st.markdown("Enter a company name to verify the legal entity and business units.")
-    
     company_input = st.text_input("Target Company Name", placeholder="e.g. Merck, Agilent")
     
     if st.button("Find Account", type="primary"):
         if not api_key:
-            st.error("❌ Please provide an API Key in the sidebar.")
-            st.stop()
+            st.error("❌ Need API Key"); st.stop()
             
-        with st.spinner(f"Scanning corporate structure for '{company_input}'..."):
-            # 1. Search Web for Structure
+        with st.spinner(f"Scanning structure for '{company_input}'..."):
             search_text = ""
             try:
                 with DDGS() as ddgs:
-                    q = f"{company_input} corporate structure business units investor relations annual report"
-                    # THE FIX: We use [r for r in ...] to force the generator to become a list of text
-                    raw_results = [r for r in ddgs.text(q, max_results=4)]
-                    search_text = str(raw_results)
+                    # FIX: Force generator to list
+                    results = [r for r in ddgs.text(f"{company_input} corporate structure business units", max_results=4)]
+                    search_text = str(results)
             except Exception as e:
                 st.warning(f"Search warning: {e}")
-            
-            # 2. AI Parsing
+
             prompt = f"""
-            Task: Analyze the search results for '{company_input}'.
-            Goal: Identify the distinct corporate entities and their business units.
-            
-            Search Data: {search_text}
-            
-            OUTPUT INSTRUCTIONS:
-            Return ONLY a valid JSON list. Do not add markdown formatting.
-            Structure:
-            [
-                {{
-                    "name": "Exact Company Name (Ticker)",
-                    "description": "Brief 5-word description (HQ Location)",
-                    "units": ["Unit 1", "Unit 2", "Unit 3", "All Units"]
-                }}
-            ]
-            If multiple companies match (e.g. Merck US vs Merck DE), list them as separate objects.
+            Task: Identify corporate entities and business units for '{company_input}' from this data: {search_text}
+            Output: JSON list ONLY.
+            Structure: [{{ "name": "Company Name", "description": "HQ/Type", "units": ["Unit 1", "Unit 2"] }}]
             """
             
-            response_text = run_gemini(prompt)
-            
-            # 3. Handle JSON Response
-            if response_text:
+            response = run_gemini(prompt)
+            if response:
                 try:
-                    # Robust cleanup: find the first [ and last ]
-                    start = response_text.find('[')
-                    end = response_text.rfind(']') + 1
-                    if start != -1 and end != -1:
-                        clean_json = response_text[start:end]
-                        data = json.loads(clean_json)
-                        
-                        if data:
-                            st.session_state.entity_options = data
-                            st.session_state.step = 2
-                            st.rerun()
-                        else:
-                            st.error("AI returned empty data. Search terms might be too vague.")
-                    else:
-                         st.error("AI response was not valid JSON.")
-                         with st.expander("See Raw Output"):
-                             st.code(response_text)
-                             
-                except Exception as e:
-                    st.error(f"Error parsing AI response: {e}")
-                    with st.expander("See Raw Output"):
-                        st.code(response_text)
-            else:
-                st.error("❌ Could not connect to Gemini. Check your API Key permissions.")
+                    # Clean JSON
+                    start, end = response.find('['), response.rfind(']') + 1
+                    data = json.loads(response[start:end])
+                    st.session_state.entity_options = data
+                    st.session_state.step = 2
+                    st.rerun()
+                except:
+                    st.error("AI could not parse structure. Try a more specific name.")
 
-# ==========================================
-# STEP 2: SELECTOR & DEEP DIVE
-# ==========================================
+# STEP 2: DEEP DIVE (The "Mega Prompt")
 if st.session_state.step == 2:
     st.subheader("Step 2: Confirm Scope")
     
     if not st.session_state.entity_options:
-        st.warning("Session data lost. Please start over.")
-        if st.button("Back"): 
-            st.session_state.step = 1
-            st.rerun()
-        st.stop()
+        st.warning("No data. Click Start New Search."); st.stop()
 
-    col_a, col_b = st.columns(2)
-    
-    with col_a:
-        st.info("🏢 **Select the Legal Entity**")
-        options = st.session_state.entity_options
-        display_names = [f"{o.get('name', 'Unknown')} - {o.get('description', '')}" for o in options]
-        selected_idx = st.radio("Choose Entity:", range(len(options)), format_func=lambda x: display_names[x])
-        selected_entity = options[selected_idx]
-        real_company_name = selected_entity['name']
-
-    with col_b:
-        st.success("📂 **Select Business Unit**")
-        unit_options = selected_entity.get('units', ["General"])
-        real_unit_name = st.selectbox("Analyze which Unit?", unit_options)
+    # Selectors
+    col1, col2 = st.columns(2)
+    with col1:
+        opts = st.session_state.entity_options
+        names = [f"{o['name']} ({o['description']})" for o in opts]
+        idx = st.radio("Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
+        real_company = opts[idx]['name']
+    with col2:
+        real_unit = st.selectbox("Business Unit:", opts[idx].get('units', ['General']))
 
     st.markdown("---")
-    
-    with st.expander("Add Deal Context (Optional)", expanded=True):
-        col_c, col_d = st.columns(2)
-        with col_c:
-            competitors = st.text_input("Competitors", placeholder="e.g. Thermo Fisher")
-        with col_d:
-            context = st.text_input("Your Goal", placeholder="e.g. Selling a CRM implementation...")
+    with st.expander("Add Context", expanded=True):
+        c1, c2 = st.columns(2)
+        competitors = c1.text_input("Competitors", placeholder="e.g. Thermo Fisher")
+        context = c2.text_input("Your Goal", placeholder="e.g. Selling CRM software")
 
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
-        with st.spinner(f"Analyzing {real_company_name} ({real_unit_name})..."):
+        with st.spinner(f"Analyzing {real_company} ({real_unit})..."):
             
-            search_data = ""
+            # 1. DEEP SEARCH (The Fix applied here too)
+            search_dump = ""
+            queries = [
+                f"{real_company} {real_unit} revenue growth financial results 2024 2025",
+                f"{real_company} {real_unit} strategic priorities investments 2025",
+                f"{real_company} {real_unit} layoffs restructuring risks 2025",
+                f"{real_company} {real_unit} recent contracts partnerships 2025"
+            ]
+            
             try:
                 with DDGS() as ddgs:
-                    queries = [
-                        f"{real_company_name} {real_unit_name} revenue growth financial results 2024 2025",
-                        f"{real_company_name} {real_unit_name} strategic initiatives investments 2025",
-                        f"{real_company_name} {real_unit_name} layoffs risks restructuring 2025"
-                    ]
                     for q in queries:
-                        # THE FIX IS APPLIED HERE TOO
-                        raw_r = [r for r in ddgs.text(q, max_results=2)]
-                        search_data += f"\nQuery: {q}\nResults: {str(raw_r)}\n"
+                        # CRITICAL FIX: Convert generator to list immediately
+                        results = [r for r in ddgs.text(q, max_results=3)]
+                        if results:
+                            search_dump += f"\nQuery: {q}\nData: {str(results)}\n"
             except Exception as e:
-                st.warning(f"Search hiccup: {e}. Proceeding with available data.")
-            
+                st.warning(f"Search warning: {e}")
+
+            # 2. THE MEGA PROMPT
             final_prompt = f"""
-            Role: Senior Enterprise Sales Analyst.
-            Target: {real_company_name}
-            Business Unit: {real_unit_name}
+            Role: Senior Market Intelligence Analyst.
+            Target: **{real_company}** (Specific Unit: **{real_unit}**).
             Competitors: {competitors}
             User Context: {context}
             
-            LATEST WEB DATA:
-            {search_data}
+            RAW SEARCH DATA:
+            {search_dump}
             
-            OUTPUT FORMAT (Markdown Report):
-            1. **Business Unit Health**:
-               - Growth Trend (Revenue/Margins).
-               - Market Share Signal (Gaining/Losing vs Competitors).
-               
-            2. **Strategic Initiatives (Follow the Money)**:
-               - Identify 2-3 funded projects or priorities found in the search.
-               - Operational Goal for each.
-               
-            3. **Financial & Risk Reality**:
-               - Cash Flow/Capex.
-               - Layoff Radar/Restructuring.
-               - Key Risks.
-               
-            4. **Soft Signals**:
-               - Leadership changes.
-               - Hiring patterns.
+            INSTRUCTIONS:
+            Write a 'Zero-Fluff' competitive briefing. If data is missing, make a logical inference based on the industry status of {real_company}.
+            
+            SECTION A: Business Unit Health
+            - **Growth Signal**: (e.g., "Expanding", "Stable", "Struggling"). Cit specific revenue % or organic growth if found in the data.
+            - **Market Position**: Are they gaining or losing share vs {competitors}?
+            
+            SECTION B: Strategic Initiatives (Follow the Money)
+            - List 2-3 funded priorities for 2025/2026.
+            - **Operational Goal**: What metric are they trying to improve? (e.g. "Speed to market", "Cost reduction").
+            
+            SECTION C: Risks & Financials
+            - **Layoff Radar**: Any restructuring or cost-cutting mentioned?
+            - **Cash Position**: Are they investing or saving?
+            
+            SECTION D: "Soft Signals"
+            - Leadership changes or hiring focuses.
+            
+            Format: Markdown Tables and Bullet Points. Concise.
             """
             
             report = run_gemini(final_prompt)
             
             if report:
-                st.markdown(f"### 📊 Analyst Briefing: {real_company_name}")
+                st.markdown(f"### 📊 Analyst Briefing: {real_company}")
                 st.markdown(report)
+                
+                # Debug Expander (To verify data flow)
+                with st.expander("🕵️‍♂️ View Raw Search Data (Debug)"):
+                    st.code(search_dump)
             else:
-                st.error("Failed to generate report. Please check API Key.")
+                st.error("AI generation failed.")
