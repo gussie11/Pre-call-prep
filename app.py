@@ -1,21 +1,3 @@
-This is the exact issue I suspected: **The app is "blind" in Step 2.**
-
-In Python, the search tool returns a "Generator" (a promise of data), not the data itself.
-
-* **What happened:** The code said `search_data += str(results)`.
-* **What the AI saw:** `"<generator object DDGS.text at 0x7f...>"` instead of the actual text about Merck.
-* **The Result:** The AI honestly replied, "I have no data."
-
-Here is the **Fixed `app.py**`. I have applied the "Generator Fix" to **Step 2** (the deep dive) and updated the prompt to match the high-quality "Mega Prompt" we used in the chat.
-
-### **Instructions**
-
-1. Open `Pre-call-prep/app.py`.
-2. **Delete everything**.
-3. **Paste this code** (It fixes the search logic and improves the prompt).
-4. **Reboot** the app.
-
-```python
 import streamlit as st
 import google.generativeai as genai
 from duckduckgo_search import DDGS
@@ -53,7 +35,8 @@ def run_gemini(prompt):
         st.error(f"Config Error: {e}")
         return None
 
-    models = ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
+    # Try newer models first
+    models = ["models/gemini-2.0-flash-exp", "models/gemini-2.5-flash", "models/gemini-1.5-flash"]
     for m in models:
         try:
             model = genai.GenerativeModel(m)
@@ -93,7 +76,8 @@ if st.session_state.step == 1:
             if response:
                 try:
                     # Clean JSON
-                    start, end = response.find('['), response.rfind(']') + 1
+                    start = response.find('[')
+                    end = response.rfind(']') + 1
                     data = json.loads(response[start:end])
                     st.session_state.entity_options = data
                     st.session_state.step = 2
@@ -127,7 +111,7 @@ if st.session_state.step == 2:
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
         with st.spinner(f"Analyzing {real_company} ({real_unit})..."):
             
-            # 1. DEEP SEARCH (The Fix applied here too)
+            # 1. DEEP SEARCH
             search_dump = ""
             queries = [
                 f"{real_company} {real_unit} revenue growth financial results 2024 2025",
@@ -182,11 +166,5 @@ if st.session_state.step == 2:
             if report:
                 st.markdown(f"### 📊 Analyst Briefing: {real_company}")
                 st.markdown(report)
-                
-                # Debug Expander (To verify data flow)
-                with st.expander("🕵️‍♂️ View Raw Search Data (Debug)"):
-                    st.code(search_dump)
             else:
                 st.error("AI generation failed.")
-
-```
