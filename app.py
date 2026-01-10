@@ -113,8 +113,8 @@ if st.button("Run Analysis", type="primary"):
     """
     
     try:
-        # Call Gemini Pro
-        model = genai.GenerativeModel('gemini-pro')
+        # Call Gemini 1.5 Flash (Updated Model)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(final_prompt)
         
         # Display Result
