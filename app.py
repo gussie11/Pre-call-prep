@@ -32,7 +32,7 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
-        # Priority list: Try 2.0/2.5 first (Fastest), fallback to 1.5
+        # Try best models first
         models = ["models/gemini-2.0-flash-exp", "models/gemini-2.5-flash", "models/gemini-1.5-flash"]
         for m in models:
             try:
@@ -45,20 +45,18 @@ def run_gemini(prompt):
 
 def extract_json(text):
     """
-    Robustly finds JSON in chatty AI responses.
+    Robust JSON extractor that handles 'chatty' AI prefixes.
     """
     try:
-        # Method 1: Look for Markdown code blocks
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-            return json.loads(text)
+        # Strip code blocks
+        if "```" in text:
+            # Find the first json block
+            text = text.split("```json")[-1].split("```")[0]
         
-        # Method 2: Regex search for the first list [...]
+        # Regex to find the main list structure [ ... ]
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match:
             return json.loads(match.group(0))
-            
-        # Method 3: Raw parse attempt
         return json.loads(text)
     except:
         return None
@@ -67,7 +65,7 @@ def extract_json(text):
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
 # ==========================================
-# STEP 1: SMART SEARCH & IDENTIFY
+# STEP 1: DEEP IDENTIFICATION
 # ==========================================
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
@@ -77,28 +75,35 @@ if st.session_state.step == 1:
         if not api_key:
             st.error("❌ Need API Key"); st.stop()
             
-        with st.spinner(f"Scanning structure for '{company_input}'..."):
+        with st.spinner(f"Scanning global entities for '{company_input}' (checking for name collisions)..."):
             search_text = ""
             try:
                 with DDGS() as ddgs:
-                    # FIX: Force generator to list immediately
-                    results = [r for r in ddgs.text(f"{company_input} corporate structure business units", max_results=4)]
+                    # FIX: Broader search to catch 'Merck KGaA' vs 'Merck & Co'
+                    # We pull 10 results now instead of 4 to ensure we see both
+                    q = f"{company_input} distinct legal entities headquarters subsidiaries disambiguation"
+                    results = [r for r in ddgs.text(q, max_results=10)]
                     search_text = str(results)
             except Exception as e:
                 st.warning(f"Search warning: {e}")
 
-            # Strict Prompt for JSON
+            # Prompt specifically asks to separate entities
             prompt = f"""
-            Task: Identify distinct corporate entities and their business units for '{company_input}' based on this data: {search_text}
+            Task: Analyze the search data for '{company_input}'.
+            Goal: Identify ALL distinct major corporate entities with this name.
+            
+            CRITICAL: Check for name collisions (e.g. Merck US vs Merck Germany, or different companies with similar names).
+            
+            Search Data: {search_text}
             
             OUTPUT INSTRUCTIONS:
-            Return ONLY a valid JSON list. No explanation text.
+            Return ONLY a valid JSON list.
             Format:
             [
                 {{
-                    "name": "Exact Legal Name",
-                    "description": "Headquarters/Industry Type",
-                    "units": ["Unit 1", "Unit 2", "Unit 3"]
+                    "name": "Full Legal Name (e.g. Merck KGaA)",
+                    "description": "HQ Location & Primary Industry",
+                    "units": ["List 3-4 Major Business Units found"]
                 }}
             ]
             """
@@ -112,14 +117,13 @@ if st.session_state.step == 1:
                     st.session_state.step = 2
                     st.rerun()
                 else:
-                    st.error("AI returned invalid data structure. Please try again.")
-                    with st.expander("Debug Raw Output"):
-                        st.code(response)
+                    st.error("AI could not format the data. Showing raw output:")
+                    st.code(response)
             else:
-                st.error("Connection failed. Check API Key.")
+                st.error("Connection failed.")
 
 # ==========================================
-# STEP 2: DEEP DIVE (The "Mega Prompt")
+# STEP 2: SELECTOR & ANALYSIS
 # ==========================================
 if st.session_state.step == 2:
     st.subheader("Step 2: Confirm Scope")
@@ -127,18 +131,18 @@ if st.session_state.step == 2:
     if not st.session_state.entity_options:
         st.warning("No data found."); st.stop()
 
-    # Dynamic Selectors
     col1, col2 = st.columns(2)
     with col1:
         opts = st.session_state.entity_options
+        # Create unique keys for the radio buttons
         names = [f"{o['name']} ({o['description']})" for o in opts]
-        idx = st.radio("Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
+        idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x])
         real_company = opts[idx]['name']
     with col2:
-        real_unit = st.selectbox("Business Unit:", opts[idx].get('units', ['General']))
+        real_unit = st.selectbox("Select Business Unit:", opts[idx].get('units', ['General']))
 
     st.markdown("---")
-    with st.expander("Add Context", expanded=True):
+    with st.expander("Add Deal Context", expanded=True):
         c1, c2 = st.columns(2)
         competitors = c1.text_input("Competitors", placeholder="e.g. Thermo Fisher")
         context = c2.text_input("Your Goal", placeholder="e.g. Selling CRM software")
@@ -165,7 +169,6 @@ if st.session_state.step == 2:
             except Exception as e:
                 st.warning(f"Search warning: {e}")
 
-            # Analyst Prompt
             final_prompt = f"""
             Role: Senior Market Intelligence Analyst.
             Target: **{real_company}** (Specific Unit: **{real_unit}**).
@@ -176,18 +179,18 @@ if st.session_state.step == 2:
             {search_dump}
             
             INSTRUCTIONS:
-            Write a 'Zero-Fluff' competitive briefing. Base it strictly on the search data provided.
+            Write a 'Zero-Fluff' competitive briefing based strictly on the search data.
             
             SECTION A: Business Unit Health
-            - **Growth Signal**: (e.g., "Expanding", "Stable", "Struggling"). Cite specific revenue % if found.
+            - **Growth Signal**: (e.g., "Expanding", "Stable", "Struggling"). Cit specific revenue % if found.
             - **Market Position**: Gaining or losing share vs {competitors}?
             
             SECTION B: Strategic Initiatives (Follow the Money)
-            - List 2-3 funded priorities for 2025/2026 found in the text.
+            - List 2-3 funded priorities for 2025/2026.
             - **Operational Goal**: What metric are they improving?
             
             SECTION C: Risks & Financials
-            - **Layoff Radar**: Mentions of "restructuring", "cost savings", or "reduction".
+            - **Layoff Radar**: Mentions of "restructuring" or "cost savings".
             - **Cash Position**: Investing or saving?
             
             SECTION D: "Soft Signals"
