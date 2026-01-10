@@ -2,115 +2,140 @@ import streamlit as st
 import google.generativeai as genai
 from duckduckgo_search import DDGS
 
-# 1. Page Configuration
-st.set_page_config(page_title="Sales Prep Analyst", page_icon="🚀", layout="wide")
+# 1. Page Config
+st.set_page_config(page_title="Sales Prep Analyst", page_icon="🕵️‍♂️", layout="wide")
 
-# 2. API Key Management
+# 2. Session State Setup (To remember step 1)
+if "step" not in st.session_state:
+    st.session_state.step = 1
+if "company_info" not in st.session_state:
+    st.session_state.company_info = ""
+
+# 3. Sidebar (API Key)
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header("⚙️ Configuration")
     if "GOOGLE_API_KEY" in st.secrets:
-        st.success("✅ API Key loaded from Secrets")
+        st.success("✅ Key loaded from Secrets")
         api_key = st.secrets["GOOGLE_API_KEY"]
     else:
         api_key = st.text_input("Enter Gemini API Key", type="password")
-        if not api_key:
-            st.warning("⚠️ Please enter your key to proceed.")
+    
+    # Reset Button
+    if st.button("Start Over"):
+        st.session_state.step = 1
+        st.rerun()
 
-# 3. Configure Gemini
-if api_key:
-    try:
-        genai.configure(api_key=api_key)
-    except Exception as e:
-        st.error(f"Configuration Error: {e}")
-
-# --- HELPER: Find a working model ---
+# 4. Helper Functions
 def get_working_model():
-    # UPDATED LIST based on your specific access rights
-    candidates = [
-        "models/gemini-2.5-flash",       # Your best available model
-        "models/gemini-2.5-pro",         # Your premium model
-        "models/gemini-2.0-flash",       # Fallback
-        "models/gemini-flash-latest",    # Generic fallback
-        "models/gemini-pro-latest"
-    ]
-    return candidates
+    return ["models/gemini-2.5-flash", "models/gemini-1.5-flash", "models/gemini-pro"]
 
-# 4. Main Interface
-st.title("🚀 360° Sales Analyst (Gemini 2.5)")
-st.markdown("Generate a pre-call briefing using live web data.")
-
-col1, col2 = st.columns(2)
-with col1:
-    target_company = st.text_input("Target Company", placeholder="e.g. Agilent Technologies")
-    business_unit = st.text_input("Business Unit", placeholder="e.g. Life Sciences Group")
-with col2:
-    competitors = st.text_input("Competitors", placeholder="e.g. Thermo Fisher")
-    user_context = st.text_area("Context", placeholder="Paste notes here...", height=100)
-
-# 5. Logic
-if st.button("Run Analysis", type="primary"):
-    if not api_key:
-        st.error("❌ API Key missing.")
-        st.stop()
-        
-    # --- PHASE 1: SEARCH ---
-    status = st.empty()
-    status.info(f"🔍 Searching web for {target_company}...")
-    
-    search_results = ""
-    try:
-        with DDGS() as ddgs:
-            queries = [
-                f"{target_company} {business_unit} financial results 2024 2025 revenue",
-                f"{target_company} {business_unit} strategic initiatives investments 2025",
-                f"{target_company} {business_unit} risks layoffs 2025"
-            ]
-            for q in queries:
-                r = ddgs.text(q, max_results=2)
-                if r: search_results += f"\nQ: {q}\nResult: {str(r)}\n"
-    except Exception as e:
-        st.warning(f"Search minor error: {e}")
-
-    # --- PHASE 2: GENERATE (With Fallback) ---
-    status.info("🧠 Connecting to Gemini...")
-    
-    prompt = f"""
-    Role: Senior Sales Analyst.
-    Task: Briefing for {target_company} ({business_unit}).
-    Competitors: {competitors}
-    Context: {user_context}
-    
-    Data:
-    {search_results}
-    
-    Output Format (Markdown Tables):
-    1. Business Health (Growth/Margins)
-    2. Strategic Initiatives (Funded Projects)
-    3. Risks (Cash/Layoffs)
-    4. Soft Signals (Hiring/Leadership)
-    """
-    
-    # Try models one by one
-    success = False
-    model_list = get_working_model()
-    
-    for model_name in model_list:
+def run_gemini(prompt):
+    genai.configure(api_key=api_key)
+    models = get_working_model()
+    for m in models:
         try:
-            # status.text(f"Trying model: {model_name}...") 
-            # Commented out to reduce UI flicker
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            
-            # If we get here, it worked!
-            status.empty()
-            st.success(f"✅ Generated using {model_name}")
-            st.markdown("### 📊 Analyst Report")
-            st.markdown(response.text)
-            success = True
-            break # Stop the loop
-        except Exception as e:
-            print(f"Failed on {model_name}: {e}")
-            continue # Try the next one
+            model = genai.GenerativeModel(m)
+            return model.generate_content(prompt).text
+        except: continue
+    return "Error: Could not connect to AI."
 
-    if not success:
-        status.error("❌ All models failed. Please check your API Key permissions.")
+# --- APP FLOW ---
+
+st.title("🕵️‍♂️ 360° Account Validator & Analyst")
+
+# STEP 1: ENTITY CHECK
+if st.session_state.step == 1:
+    st.subheader("Step 1: Account Confirmation")
+    company_input = st.text_input("Enter Target Company Name", placeholder="e.g. Merck")
+    
+    if st.button("Find Entity"):
+        if not api_key:
+            st.error("Please provide an API Key.")
+            st.stop()
+            
+        with st.spinner("Verifying corporate structure..."):
+            # Search for basic info
+            with DDGS() as ddgs:
+                q = f"{company_input} corporate headquarters business units stock ticker"
+                results = list(ddgs.text(q, max_results=3))
+            
+            # AI Confirmation Prompt
+            prompt = f"""
+            Role: Sales Researcher.
+            Input: "{company_input}"
+            Search Data: {str(results)}
+            
+            Task: Identify if this company name is ambiguous (e.g. Merck US vs Merck KGaA).
+            
+            Output Format:
+            1. If ambiguous, list the options with HQ location and Ticker.
+            2. If clear, list the Major Business Units found.
+            3. Ask the user to confirm which specific Unit or Division they want to analyze.
+            
+            Keep it brief.
+            """
+            response = run_gemini(prompt)
+            
+            # Store result and move to next step
+            st.session_state.company_info = response
+            st.session_state.target_name = company_input
+            st.session_state.step = 2
+            st.rerun()
+
+# STEP 2: SCOPE SELECTION & ANALYSIS
+if st.session_state.step == 2:
+    st.subheader("Step 2: Confirm Scope")
+    
+    # Show what the AI found
+    st.info(f"**Entity Report for '{st.session_state.target_name}':**")
+    st.write(st.session_state.company_info)
+    
+    st.markdown("---")
+    st.write("👇 **Now, define your analysis:**")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        # Pre-fill these if user wants to change them
+        confirmed_company = st.text_input("Confirmed Entity Name", value=st.session_state.target_name)
+        selected_unit = st.text_input("Business Unit to Analyze", placeholder="e.g. Life Science / Process Solutions")
+    with col2:
+        competitors = st.text_input("Competitors (Optional)", placeholder="e.g. Thermo Fisher")
+        context = st.text_area("Your Goals / Context", placeholder="I'm selling a new CRM tool...", height=100)
+        
+    if st.button("Run Deep Dive Analysis", type="primary"):
+        with st.spinner("Generating Analyst Report..."):
+            # Deep Search
+            search_data = ""
+            with DDGS() as ddgs:
+                queries = [
+                    f"{confirmed_company} {selected_unit} revenue growth 2024 2025",
+                    f"{confirmed_company} {selected_unit} strategic priorities investments 2025",
+                    f"{confirmed_company} {selected_unit} layoffs risks 2025"
+                ]
+                for q in queries:
+                    r = ddgs.text(q, max_results=2)
+                    search_data += f"\n{r}"
+            
+            # Final Report Prompt
+            final_prompt = f"""
+            Role: Senior Sales Analyst.
+            Target: {confirmed_company} ({selected_unit})
+            Competitors: {competitors}
+            Context: {context}
+            Data: {search_data}
+            
+            Output Markdown Report:
+            1. **Unit Health**: Growth, Margins, Market Share.
+            2. **Strategy**: Top 3 funded initiatives (Follow the money).
+            3. **Risks**: Cash flow, Layoffs, leadership changes.
+            4. **Buying Signal**: Who buys? (Customer profile).
+            """
+            
+            report = run_gemini(final_prompt)
+            
+            st.markdown("### 📊 Final Analyst Briefing")
+            st.markdown(report)
+            
+            if st.button("Start New Search"):
+                st.session_state.step = 1
+                st.rerun()
