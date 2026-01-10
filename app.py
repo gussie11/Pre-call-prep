@@ -13,6 +13,8 @@ if "step" not in st.session_state:
     st.session_state.step = 1
 if "entity_options" not in st.session_state:
     st.session_state.entity_options = []
+if "manual_entry" not in st.session_state:
+    st.session_state.manual_entry = False
 
 # --- 3. Sidebar ---
 with st.sidebar:
@@ -26,6 +28,7 @@ with st.sidebar:
     if st.button("🔄 Start New Search"):
         st.session_state.step = 1
         st.session_state.entity_options = []
+        st.session_state.manual_entry = False
         st.rerun()
 
 # --- 4. Helper Functions ---
@@ -33,7 +36,6 @@ def run_gemini(prompt):
     if not api_key: return None
     try:
         genai.configure(api_key=api_key)
-        # 1.5 Pro is BEST for reasoning. Flash is fallback.
         models = ["models/gemini-1.5-pro", "models/gemini-1.5-pro-latest", "models/gemini-1.5-flash"]
         for m in models:
             try:
@@ -45,58 +47,82 @@ def run_gemini(prompt):
     return None
 
 def extract_json(text):
-    """Robust JSON extractor for chatty AI responses."""
+    """Aggressive JSON extraction."""
     try:
-        if "```" in text:
-            text = text.split("```json")[-1].split("```")[0]
+        # Remove markdown code blocks
+        text = re.sub(r"```json|```", "", text).strip()
+        # Find the main list [ ... ]
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match: return json.loads(match.group(0))
         return json.loads(text)
     except: return None
 
-def robust_search(query, max_retries=3):
-    """Fetches 10 results to ensure high context."""
+def robust_search(query, max_retries=2):
+    """Tries primary query, then simpler fallback if empty."""
     with DDGS() as ddgs:
-        for attempt in range(max_retries):
-            try:
-                results = [r for r in ddgs.text(query, max_results=10)]
-                if results: return results
-                time.sleep(0.5)
-            except:
-                time.sleep(1)
-                continue
+        # Attempt 1: The specific query
+        try:
+            results = [r for r in ddgs.text(query, max_results=8)]
+            if results: return results
+        except: pass
+        
+        # Attempt 2: Simple query (Fallback)
+        time.sleep(1)
+        try:
+            simple_q = query.split(" ")[0] # Just the company name
+            results = [r for r in ddgs.text(simple_q + " company overview", max_results=8)]
+            if results: return results
+        except: pass
+        
     return []
 
 # --- APP FLOW ---
 st.title("🕵️‍♂️ 360° Account Validator & Analyst")
 
 # ==========================================
-# STEP 1: IDENTIFICATION (Adaptive)
+# STEP 1: IDENTIFICATION (With Manual Override)
 # ==========================================
 if st.session_state.step == 1:
     st.subheader("Step 1: Account Lookup")
-    company_input = st.text_input("Target Company Name", placeholder="e.g. Solvias, Merck")
     
+    col_input, col_manual = st.columns([3, 1])
+    with col_input:
+        company_input = st.text_input("Target Company Name", placeholder="e.g. Solvias, Merck")
+    with col_manual:
+        st.write("") # Spacer
+        st.write("") 
+        if st.button("Skip & Enter Manually"):
+            st.session_state.manual_entry = True
+            st.session_state.entity_options = [{"name": company_input if company_input else "Target Company", "description": "Manual Entry", "units": ["General / All Units"]}]
+            st.session_state.step = 2
+            st.rerun()
+
     if st.button("Find Account", type="primary"):
         if not api_key: st.error("❌ Need API Key"); st.stop()
-            
-        with st.spinner(f"Scanning global entities for '{company_input}'..."):
-            # Search for structure
-            q = f"{company_input} corporate structure headquarters business units investor relations"
+        
+        with st.spinner(f"Scanning for '{company_input}'..."):
+            # 1. Search
+            q = f"{company_input} corporate structure business units investor relations"
             results = robust_search(q)
             search_text = str(results)
-            
-            # Adaptive Prompt (Handles Unique AND Ambiguous names)
+
+            # Debug Expander to see if search is working
+            with st.expander("🕵️‍♂️ Debug: View Raw Search Results"):
+                st.write(results if results else "No results found.")
+
+            if not results:
+                st.error(f"Search found 0 results for '{company_input}'. Try the 'Skip' button.")
+                st.stop()
+
+            # 2. AI Parsing
             prompt = f"""
-            Task: Analyze the search data for '{company_input}'.
+            Task: Extract corporate entities for '{company_input}' from: {search_text}
             
-            SCENARIO A: Ambiguous Name (e.g. "Merck") -> List distinct legal entities (e.g. Merck US vs Merck DE).
-            SCENARIO B: Unique Name (e.g. "Solvias") -> List just the one company found.
+            SCENARIO A (Ambiguous): If multiple distinct companies exist (e.g. Merck US vs Merck DE), list both.
+            SCENARIO B (Unique): If only one company is found (e.g. Solvias), list just that one.
             
-            Output: JSON list ONLY.
-            Format: [{{ "name": "Full Legal Name", "description": "HQ/Type", "units": ["Unit 1", "Unit 2"] }}]
-            
-            Search Data: {search_text}
+            Output JSON ONLY:
+            [ {{ "name": "Legal Name", "description": "HQ/Type", "units": ["Unit 1", "Unit 2"] }} ]
             """
             
             response = run_gemini(prompt)
@@ -107,28 +133,35 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
             else:
-                st.error("No data found. Try adding the HQ city (e.g. 'Solvias Basel').")
+                st.error("AI couldn't parse the data. Use 'Skip & Enter Manually'.")
 
 # ==========================================
-# STEP 2: DEEP DIVE (The "Mega Prompt")
+# STEP 2: DEEP DIVE (Mega Prompt)
 # ==========================================
 if st.session_state.step == 2:
     st.subheader("Step 2: Confirm Scope")
     
-    if not st.session_state.entity_options: st.warning("No data."); st.stop()
-
-    col1, col2 = st.columns(2)
-    with col1:
-        opts = st.session_state.entity_options
-        names = [f"{o['name']} ({o['description']})" for o in opts]
-        # Auto-select first option if only one exists
-        idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x], index=0)
-        real_company = opts[idx]['name']
-    with col2:
-        # Add "All" option for corporate overview
-        raw_units = opts[idx].get('units', [])
-        combined_units = ["All / Full Company Overview"] + raw_units
-        real_unit = st.selectbox("Select Business Unit:", combined_units)
+    opts = st.session_state.entity_options
+    
+    # If Manual Entry, just show simple text inputs
+    if st.session_state.get("manual_entry"):
+        st.info("⚠️ Manual Mode Active")
+        col1, col2 = st.columns(2)
+        with col1:
+            real_company = st.text_input("Confirm Company Name:", value=opts[0]['name'])
+        with col2:
+            real_unit = st.text_input("Business Unit / Focus Area:", value="General Overview")
+    else:
+        # Standard Selectors
+        col1, col2 = st.columns(2)
+        with col1:
+            names = [f"{o['name']} ({o['description']})" for o in opts]
+            idx = st.radio("Select Legal Entity:", range(len(opts)), format_func=lambda x: names[x], index=0)
+            real_company = opts[idx]['name']
+        with col2:
+            raw_units = opts[idx].get('units', [])
+            combined_units = ["All / Full Company Overview"] + raw_units
+            real_unit = st.selectbox("Select Business Unit:", combined_units)
 
     st.markdown("---")
     with st.expander("Add Deal Context", expanded=True):
@@ -139,17 +172,17 @@ if st.session_state.step == 2:
     if st.button("🚀 Run Deep Dive Analysis", type="primary"):
         with st.spinner(f"Running 'Zero-Fluff' Analysis for {real_company}..."):
             
-            # 1. TARGETED SEARCH (Mapped to Prompt Sections)
+            # 1. TARGETED SEARCH
             search_dump = ""
             
-            # Define queries based on scope
-            if "All" in real_unit:
+            # "All" or Manual Mode -> Broad Search
+            if "All" in real_unit or st.session_state.get("manual_entry"):
                 queries = [
                     f"{real_company} investor presentation 2024 2025 strategic priorities",
                     f"{real_company} annual report 2024 revenue growth outlook",
-                    f"{real_company} leadership team changes CEO 2024 2025",
+                    f"{real_company} leadership team CEO management changes 2024 2025",
                     f"{real_company} restructuring layoffs new facility investment 2025",
-                    f"{real_company} major customers partnerships case studies" 
+                    f"{real_company} major customers partnerships case studies"
                 ]
             else:
                 queries = [
@@ -164,7 +197,7 @@ if st.session_state.step == 2:
                 if res:
                     search_dump += f"\nQuery: {q}\nData: {str(res)}\n"
 
-            # 2. THE MEGA PROMPT (Hard-coded)
+            # 2. THE MEGA PROMPT
             final_prompt = f"""
             Role: Senior Market Intelligence Analyst.
             Task: Produce a "Zero-Fluff" competitive briefing for **{real_company}** (Unit: **{real_unit}**).
